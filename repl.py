@@ -1,6 +1,7 @@
 import cmd
 import git_service
 import ai_service
+import error_decorator
 
 
 class GitAssistant(cmd.Cmd):
@@ -14,14 +15,17 @@ class GitAssistant(cmd.Cmd):
         self.max_tokens = max_tokens
         self.safe_mode = safe_mode
 
+    @error_decorator.handle_error
     def do_status(self, arg):
         """현재 Git 변경 상태를 출력합니다."""
         print(git_service.git_status())
 
+    @error_decorator.handle_error
     def do_diff(self, arg):
         """현재 변경 내용을 출력합니다."""
         print(git_service.git_diff())
 
+    @error_decorator.handle_error
     def do_commit(self, arg):
         """변경 내용을 바탕으로 커밋 메시지 초안을 생성합니다."""
         diff = git_service.git_diff()
@@ -38,6 +42,7 @@ class GitAssistant(cmd.Cmd):
             )
         )
 
+    @error_decorator.handle_error
     def do_pr(self, arg):
         """변경 내용을 바탕으로 PR 초안을 생성합니다."""
         diff = git_service.git_diff()
@@ -69,6 +74,3 @@ class GitAssistant(cmd.Cmd):
 
 def run(model, temperature, max_tokens, safe_mode):
     GitAssistant(model, temperature, max_tokens, safe_mode).cmdloop()
-
-
-
