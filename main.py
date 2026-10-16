@@ -21,15 +21,15 @@ def build_parser():
 def main():
     args = build_parser().parse_args()
 
+
     if args.command is None:
-        if args.command is None:
-            repl.run(
-                model=None,
-                temperature=0.2,
-                max_tokens=500,
-                safe_mode=False,
-            )
-    return
+        repl.run(
+            model=None,
+            temperature=0.2,
+            max_tokens=500,
+            safe_mode=False,
+        )
+        return
 
     assistant = repl.GitAssistant(
         model=args.model,
