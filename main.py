@@ -1,43 +1,95 @@
-import repl
 import argparse
+import ai_service
+import error_decorator
+import git_service
+
+
+@error_decorator.handle_error
+def show_status(_args):
+    """현재 Git 변경 상태를 출력합니다."""
+    status = git_service.git_status()
+    if status:
+        print(status, end="")
+    else:
+        print("변경 사항이 없습니다.")
+
+
+@error_decorator.handle_error
+def show_diff(_args):
+    """스테이징하지 않은 추적 파일의 변경 내용을 출력합니다."""
+    diff = git_service.git_diff()
+    if diff:
+        print(diff, end="")
+    else:
+        print("git diff에서 수집할 변경 내용이 없습니다.")
+
+
+@error_decorator.handle_error
+def generate_commit(args):
+    """Git 변경 내용으로 커밋 메시지 초안을 생성합니다."""
+    diff = git_service.git_diff()
+    if not diff:
+        print("git diff에서 수집할 변경 내용이 없습니다.")
+        return
+
+    result = ai_service.ai_commit(
+        diff,
+        model=args.model,
+        temperature=args.temperature,
+        max_tokens=args.max_tokens,
+        safe_mode=args.safe_mode,
+    )
+    print(result)
+
+
+@error_decorator.handle_error
+def generate_pr(args):
+    """Git 변경 내용으로 PR 초안을 생성합니다."""
+    diff = git_service.git_diff()
+    if not diff:
+        print("git diff에서 수집할 변경 내용이 없습니다.")
+        return
+
+    result = ai_service.ai_pr(
+        diff,
+        model=args.model,
+        temperature=args.temperature,
+        max_tokens=args.max_tokens,
+        safe_mode=args.safe_mode,
+    )
+    print(result)
 
 
 def build_parser():
     parser = argparse.ArgumentParser(
         description="Git 변경사항으로 커밋 메시지와 PR 초안을 만듭니다."
     )
-    subparsers = parser.add_subparsers(dest="command")
+    subparsers = parser.add_subparsers(dest="command", required=True)
 
-    for command in ("commit", "pr"):
-        command_parser = subparsers.add_parser(command)
+    status_parser = subparsers.add_parser("status", help="변경 파일 상태를 출력합니다.")
+    status_parser.set_defaults(handler=show_status)
+
+    diff_parser = subparsers.add_parser("diff", help="현재 변경 내용을 출력합니다.")
+    diff_parser.set_defaults(handler=show_diff)
+
+    commands = [
+        ("commit", generate_commit, "커밋 메시지 초안을 생성합니다."),
+        ("pr", generate_pr, "PR 초안을 생성합니다."),
+    ]
+    for command, handler, help_text in commands:
+        command_parser = subparsers.add_parser(command, help=help_text)
         command_parser.add_argument("--model", default=None)
         command_parser.add_argument("--temperature", type=float, default=0.2)
         command_parser.add_argument("--max-tokens", type=int, default=500)
         command_parser.add_argument("--safe-mode", action="store_true")
+        command_parser.set_defaults(handler=handler)
 
     return parser
 
 
 def main():
     args = build_parser().parse_args()
-
-
-    if args.command is None:
-        repl.run(
-            model=None,
-            temperature=0.2,
-            max_tokens=500,
-            safe_mode=False,
-        )
-        return
-
-    assistant = repl.GitAssistant(
-        model=args.model,
-        temperature=args.temperature,
-        max_tokens=args.max_tokens,
-        safe_mode=args.safe_mode,
-    )
-    assistant.onecmd(args.command)
+    args.handler(args)
 
 
 if __name__ == "__main__":
