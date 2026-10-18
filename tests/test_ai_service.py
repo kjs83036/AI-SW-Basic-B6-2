@@ -1,3 +1,4 @@
+import json
 import os
 from unittest.mock import Mock
 
@@ -50,6 +51,164 @@ def test_commit_title_only_is_valid() -> None:
     assert ai_service.ai_validate("수정된 내용을 반영합니다", "commit")
 
 
+@pytest.mark.parametrize("output_type", ["commit", "pr"])
+@pytest.mark.parametrize(
+    "title",
+    [
+        "fix: __init__.py 초기화 오류 수정",
+        "fix: `git diff` 실행 오류 수정",
+        "fix: *args와 **kwargs 전달 오류 수정",
+    ],
+)
+def test_literal_title_preserves_filenames_and_inline_symbols(
+    output_type: str, title: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """일반 텍스트 제목의 파일명과 기호를 재요청 없이 그대로 출력합니다."""
+    response = pr_response(title) if output_type == "pr" else title
+    api_call = Mock(return_value=response)
+    monkeypatch.setattr(ai_service, "ai_call_api", api_call)
+
+    result = ai_service.ai_generate_validated("diff", output_type, None, 0.2, 500)
+
+    assert result.splitlines()[1] == title
+    assert api_call.call_count == 1
+
+
+@pytest.mark.parametrize("output_type", ["commit", "pr"])
+@pytest.mark.parametrize(
+    "invisible",
+    [
+        "\u200b",
+        "\ufeff",
+        "\u200c\u200d",
+        "\u2060",
+        "\ufe0f",
+        "&#8203;",
+        "\u115f",
+        "\u1160",
+        "\u2800",
+        "\u3164",
+        "\uffa0",
+    ],
+)
+def test_title_rejects_invisible_only_content(
+    output_type: str, invisible: str
+) -> None:
+    """폭이 없는 문자나 그 문자 참조만 있는 제목은 거부합니다."""
+    response = pr_response(invisible) if output_type == "pr" else invisible
+
+    with pytest.raises(ValueError, match="내용이 있는 한 줄"):
+        ai_service.ai_validate(response, output_type)
+
+
+@pytest.mark.parametrize("output_type", ["commit", "pr"])
+@pytest.mark.parametrize(
+    "invisible",
+    [
+        "\u200b",
+        "\ufeff",
+        "\u200c\u200d",
+        "\u2060",
+        "\ufe0f",
+        "&#8203;",
+        "\u115f",
+        "\u1160",
+        "\u2800",
+        "\u3164",
+        "\uffa0",
+    ],
+)
+def test_body_rejects_invisible_only_bullets(
+    output_type: str, invisible: str
+) -> None:
+    """표시할 내용이 없는 불릿은 커밋 요약이나 PR 필수 내용을 대신하지 못합니다."""
+    response = (
+        pr_response().replace("- 변경 배경", f"- {invisible}")
+        if output_type == "pr"
+        else f"커밋 제목\n\n- {invisible}"
+    )
+
+    with pytest.raises(ValueError, match="불릿"):
+        ai_service.ai_validate(response, output_type)
+
+
+@pytest.mark.parametrize("output_type", ["commit", "pr"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "한국어 수정\u200b",
+        "👩\u200d💻의 cafe\u0301 표시 수정",
+        "한글\u3164 채움 문자 보존",
+        "점자\u2800 빈 셀 보존",
+    ],
+)
+def test_visible_unicode_content_is_preserved(output_type: str, text: str) -> None:
+    """표시 내용과 섞인 결합 문자와 이모지 연결 문자는 원문 그대로 보존합니다."""
+    response = (
+        pr_response(text).replace("- 변경 배경", f"- {text}")
+        if output_type == "pr"
+        else f"{text}\n\n- {text}"
+    )
+
+    result = ai_service.ai_validate(response, output_type)
+
+    assert result.splitlines()[1] == text
+    assert f"- {text}" in result
+
+
+@pytest.mark.parametrize("output_type", ["commit", "pr"])
+@pytest.mark.parametrize("invalid_part", ["title", "body"])
+def test_invisible_content_triggers_one_retry(
+    output_type: str, invalid_part: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """보이지 않는 제목이나 불릿은 한 번 재생성한 정상 응답으로 대체합니다."""
+    valid_response = pr_response() if output_type == "pr" else "변경 반영\n\n- 변경 내용"
+    if invalid_part == "title":
+        invalid_response = valid_response.replace(
+            valid_response.splitlines()[0], "\u200b", 1
+        )
+    else:
+        invalid_response = valid_response.replace(
+            "- 변경 배경" if output_type == "pr" else "- 변경 내용", "- \u200b"
+        )
+    api_call = Mock(side_effect=[invalid_response, valid_response])
+    monkeypatch.setattr(ai_service, "ai_call_api", api_call)
+
+    result = ai_service.ai_generate_validated("diff", output_type, None, 0.2, 500)
+
+    assert result == ai_service.ai_validate(valid_response, output_type)
+    assert api_call.call_count == 2
+
+
+@pytest.mark.parametrize("filler", ["\u115f", "\u1160", "\u2800", "\u3164", "\uffa0"])
+@pytest.mark.parametrize("output_type", ["commit", "pr"])
+@pytest.mark.parametrize("invalid_part", ["title", "body"])
+def test_invisible_filler_triggers_one_retry(
+    output_type: str,
+    invalid_part: str,
+    filler: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """내용 없는 한글 채움 문자와 점자 빈 셀은 한 번 재생성합니다."""
+    valid_response = pr_response() if output_type == "pr" else "변경 반영\n\n- 변경 내용"
+    if invalid_part == "title":
+        invalid_response = valid_response.replace(
+            valid_response.splitlines()[0], filler, 1
+        )
+    else:
+        invalid_response = valid_response.replace(
+            "- 변경 배경" if output_type == "pr" else "- 변경 내용",
+            f"- {filler}",
+        )
+    api_call = Mock(side_effect=[invalid_response, valid_response])
+    monkeypatch.setattr(ai_service, "ai_call_api", api_call)
+
+    result = ai_service.ai_generate_validated("diff", output_type, None, 0.2, 500)
+
+    assert result == ai_service.ai_validate(valid_response, output_type)
+    assert api_call.call_count == 2
+
+
 @pytest.mark.parametrize("separator", ["- - -", "- ---", "- \t- \t-"])
 def test_commit_rejects_thematic_break_as_body(separator: str) -> None:
     """커밋 본문에서도 내용 없는 구분선을 변경 요약으로 인정하지 않습니다."""
@@ -79,7 +238,7 @@ def test_commit_rejects_bullets_without_visible_content(bullet: str) -> None:
 @pytest.mark.parametrize("title", ["```markdown", "## 제목", "---"])
 def test_commit_rejects_markdown_formatting_as_title(title: str) -> None:
     """Markdown 서식 토큰만 있는 줄은 커밋 제목으로 인정하지 않습니다."""
-    with pytest.raises(ValueError, match="서식 없는 한 줄"):
+    with pytest.raises(ValueError, match="내용이 있는 한 줄"):
         ai_service.ai_validate(title, "commit")
 
 
@@ -162,12 +321,12 @@ def test_pr_retries_when_title_is_a_code_fence(
 
 @pytest.mark.parametrize("output_type", ["commit", "pr"])
 @pytest.mark.parametrize("title", ["` `", "[](/url)"])
-def test_invisible_or_formatted_title_triggers_retry(
+def test_empty_inline_title_triggers_retry(
     output_type: str,
     title: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """표시할 내용이 없거나 서식이 있는 제목은 한 번 재생성합니다."""
+    """인라인 서식 안에 표시할 내용이 없는 제목은 한 번 재생성합니다."""
     valid_response = (
         pr_response()
         if output_type == "pr"
@@ -196,6 +355,126 @@ def test_pr_accepts_bullets_under_nested_headings() -> None:
     )
 
     assert ai_service.ai_validate(response, "pr")
+
+
+@pytest.mark.parametrize(
+    "bullet",
+    [
+        "- ```sh\n  pytest -q\n  ```",
+        "-\n  ```sh\n  pytest -q\n  ```",
+        "-\n      pytest -q",
+    ],
+)
+def test_pr_accepts_code_blocks_inside_actual_test_bullets(
+    bullet: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """실제 목록 안의 코드 블록은 테스트 내용으로 인정하고 재요청하지 않습니다."""
+    response = pr_response().replace("- 자동 테스트를 실행합니다.", bullet)
+    api_call = Mock(return_value=response)
+    monkeypatch.setattr(ai_service, "ai_call_api", api_call)
+
+    result = ai_service.ai_pr("+ 변경", None, 0.2, 500)
+
+    assert bullet in result
+    assert api_call.call_count == 1
+
+
+@pytest.mark.parametrize("content", ["", "   ", "\u200b"])
+def test_pr_rejects_empty_code_blocks_inside_test_bullets(content: str) -> None:
+    """코드 블록도 표시할 내용이 없으면 필수 불릿으로 인정하지 않습니다."""
+    response = pr_response().replace(
+        "- 자동 테스트를 실행합니다.", f"- ```sh\n  {content}\n  ```"
+    )
+
+    with pytest.raises(ValueError, match="How to Test.*불릿"):
+        ai_service.ai_validate(response, "pr")
+
+
+def test_pr_does_not_borrow_code_after_an_empty_list() -> None:
+    """빈 목록이 끝난 뒤의 별도 코드 블록은 필수 불릿 내용으로 인정하지 않습니다."""
+    response = pr_response().replace(
+        "- 자동 테스트를 실행합니다.", "-\n\n      pytest -q"
+    )
+
+    with pytest.raises(ValueError, match="How to Test.*불릿"):
+        ai_service.ai_validate(response, "pr")
+
+
+@pytest.mark.parametrize(
+    "bullet",
+    [
+        "- `&#8203;`",
+        "- ```text\n  &#8203;\n  ```",
+        "-\n      &#8203;",
+        "- &amp;#8203;",
+        "- ![&amp;#8203;](/image.png)",
+    ],
+)
+def test_pr_preserves_visible_literal_entities_without_retry(
+    bullet: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """코드의 원문과 한 번만 디코딩되는 문자 참조를 빈 내용으로 오인하지 않습니다."""
+    response = pr_response().replace("- 자동 테스트를 실행합니다.", bullet)
+    api_call = Mock(return_value=response)
+    monkeypatch.setattr(ai_service, "ai_call_api", api_call)
+
+    result = ai_service.ai_pr("+ 변경", None, 0.2, 500)
+
+    assert bullet in result
+    assert api_call.call_count == 1
+
+
+@pytest.mark.parametrize("output_type", ["commit", "pr"])
+def test_literal_entity_in_code_title_is_visible(output_type: str) -> None:
+    """코드 제목의 문자 참조 표기는 원문 그대로 표시되는 내용으로 인정합니다."""
+    title = "`&#8203;`"
+    response = pr_response(title) if output_type == "pr" else title
+
+    assert ai_service.ai_validate(response, output_type).splitlines()[1] == title
+
+
+@pytest.mark.parametrize("bullet", ["- ![&#8203;](/image.png)", "- ![ ](/image.png)"])
+def test_pr_rejects_image_bullets_with_invisible_alt_text(bullet: str) -> None:
+    """이미지 대체 텍스트의 문자 참조도 Markdown 규칙으로 해석해 내용 여부를 판단합니다."""
+    response = pr_response().replace("- 자동 테스트를 실행합니다.", bullet)
+
+    with pytest.raises(ValueError, match="How to Test.*불릿"):
+        ai_service.ai_validate(response, "pr")
+
+
+@pytest.mark.parametrize("output_type", ["commit", "pr"])
+@pytest.mark.parametrize("part", ["title", "body"])
+@pytest.mark.parametrize("control", ["\x1b[2J", "\x00", "\x08", "\x9b2J"])
+def test_terminal_controls_trigger_retry_without_reaching_output(
+    output_type: str, part: str, control: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """표시 내용과 섞인 터미널 제어문자는 거부하고 정상 응답으로 재생성합니다."""
+    valid = pr_response() if output_type == "pr" else "변경 반영\n\n- 핵심 변경"
+    if part == "title":
+        invalid = valid.replace(valid.splitlines()[0], f"변경{control} 반영", 1)
+    else:
+        invalid = valid.replace("- ", f"- 변경{control} ", 1)
+    api_call = Mock(side_effect=[invalid, valid])
+    monkeypatch.setattr(ai_service, "ai_call_api", api_call)
+
+    with pytest.raises(ValueError, match="터미널 제어문자"):
+        ai_service.ai_validate(invalid, output_type)
+    result = ai_service.ai_generate_validated("diff", output_type, None, 0.2, 500)
+
+    assert result == ai_service.ai_validate(valid, output_type)
+    assert control not in result
+    assert api_call.call_count == 2
+
+
+def test_pr_preserves_crlf_and_tab_indented_code_blocks() -> None:
+    """정상 줄바꿈과 코드 들여쓰기 탭은 제어문자 오류 없이 처리합니다."""
+    response = pr_response().replace(
+        "- 자동 테스트를 실행합니다.", "- ```sh\n\tpytest -q\n  ```"
+    ).replace("\n", "\r\n")
+
+    result = ai_service.ai_validate(response, "pr")
+
+    assert "\tpytest -q" in result
 
 
 @pytest.mark.parametrize("underline", ["---", "==="])
@@ -519,6 +798,32 @@ def test_http_error_redacts_api_key_before_truncating_detail(
         ai_service.ai_call_api("prompt", "unknown-model", 0.2, 500)
 
     assert "TEST_ONLY" not in str(error.value)
+
+
+@pytest.mark.parametrize("control", ["\x1b[2J", "\x00", "\x08", "\x9b2J"])
+def test_http_error_escapes_terminal_controls(
+    control: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HTTP 오류 원인의 제어문자는 키를 가린 뒤 실행되지 않는 문자 표기로 표시합니다."""
+    response = requests.Response()
+    response.status_code = 400
+    response._content = json.dumps(
+        {"error": {"message": f"Unsupported model {control} TEST_ONLY_KEY"}}
+    ).encode("utf-8")
+    monkeypatch.setattr(ai_service, "load_dotenv", lambda: None)
+    monkeypatch.setenv("API_KEY", "TEST_ONLY_KEY")
+    monkeypatch.setattr(
+        ai_service.requests, "post", Mock(side_effect=requests.HTTPError(response=response))
+    )
+
+    with pytest.raises(RuntimeError) as error:
+        ai_service.ai_call_api("prompt", None, 0.2, 500)
+
+    detail = str(error.value)
+    assert control not in detail
+    assert "Unsupported model" in detail
+    assert "TEST_ONLY_KEY" not in detail
+    assert "[REDACTED]" in detail
 
 
 @pytest.mark.parametrize(

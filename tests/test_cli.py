@@ -23,6 +23,11 @@ if "TEST_API_RESPONSES" in os.environ:
         response.json.return_value = {"choices": [{"message": {"content": content}}]}
         responses.append(response)
     patch.object(ai_service.requests, "post", side_effect=responses).start()
+if "TEST_API_HTTP_ERROR" in os.environ:
+    response = ai_service.requests.Response()
+    response.status_code = 400
+    response._content = os.environ["TEST_API_HTTP_ERROR"].encode("utf-8")
+    patch.object(ai_service.requests, "post", side_effect=ai_service.requests.HTTPError(response=response)).start()
 sys.argv = ["output-6-1", *sys.argv[1:]]
 
 from output_6_1.main import main
@@ -180,6 +185,57 @@ def test_cli_logs_both_api_attempts_after_format_retry(
     assert result.returncode == 0, result.stderr
     assert "AI API 요청: 1회" in result.stderr
     assert "AI API 요청: 2회" in result.stderr
+
+
+@pytest.mark.parametrize("command", ["commit", "pr"])
+@pytest.mark.parametrize("retry_succeeds", [True, False])
+def test_cli_does_not_print_terminal_controls_from_api(
+    git_repo: Path,
+    isolated_cli_environment: dict[str, str],
+    command: str,
+    retry_succeeds: bool,
+) -> None:
+    """터미널 제어문자는 재생성 성공 여부와 관계없이 stdout과 stderr에 출력하지 않습니다."""
+    (git_repo / "app.py").write_text("value = 2\n", encoding="utf-8")
+    isolated_cli_environment["API_KEY"] = "TEST_ONLY_KEY"
+    valid = (
+        "PR 초안\n\n## Why\n- 배경\n\n## What\n- 변경\n\n## How to Test\n- 미실행"
+        if command == "pr" else "변경 반영"
+    )
+    invalid = valid.replace(valid.splitlines()[0], "변경\x1b[2J 반영", 1)
+    isolated_cli_environment["TEST_API_RESPONSES"] = json.dumps(
+        [invalid, valid if retry_succeeds else invalid]
+    )
+
+    result = run_cli(git_repo, isolated_cli_environment, command)
+
+    assert result.returncode == (0 if retry_succeeds else 1)
+    assert "\x1b" not in result.stdout + result.stderr
+    assert "AI API 요청: 2회" in result.stderr
+    if not retry_succeeds:
+        assert "터미널 제어문자" in result.stderr
+        assert result.stdout == ""
+
+
+@pytest.mark.parametrize("command", ["commit", "pr"])
+def test_cli_does_not_print_terminal_controls_from_http_errors(
+    git_repo: Path, isolated_cli_environment: dict[str, str], command: str
+) -> None:
+    """HTTP 오류 원인도 제어문자와 API 키를 노출하지 않고 실패로 종료합니다."""
+    (git_repo / "app.py").write_text("value = 2\n", encoding="utf-8")
+    isolated_cli_environment["API_KEY"] = "TEST_ONLY_KEY"
+    isolated_cli_environment["TEST_API_HTTP_ERROR"] = json.dumps(
+        {"error": {"message": "Unsupported model \x1b[2J TEST_ONLY_KEY"}}
+    )
+
+    result = run_cli(git_repo, isolated_cli_environment, command)
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert "Unsupported model" in result.stderr
+    assert "TEST_ONLY_KEY" not in result.stderr
+    assert "\x1b" not in result.stderr
+    assert "AI API 요청: 2회" not in result.stderr
 
 
 @pytest.mark.parametrize("command", ["commit", "pr"])

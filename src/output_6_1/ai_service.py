@@ -1,8 +1,8 @@
-from html import unescape
 import os
 import re
 import sys
 from typing import Literal
+from unicodedata import category
 
 import truststore
 
@@ -53,7 +53,7 @@ PR 제목 한 줄
 - 섹션 제목은 위의 영어 이름을 유지하고, 괄호 안에 한국어 설명을 덧붙일 수 있습니다.
 - diff에서 확인할 수 없는 테스트를 이미 실행한 것처럼 쓰지 마세요. 실행 여부를 알 수 없으면 미실행이라고 쓰거나 확인할 테스트를 제안하세요.
 - diff에 드러난 사실만 쓰고 내용을 지어내지 마세요.
-- 제목과 본문 외의 설명, 머리말, 코드 펜스는 출력하지 마세요.
+- 제목과 본문 외의 설명이나 머리말을 쓰거나 응답 전체를 코드 펜스로 감싸지 마세요. 테스트 불릿 안의 코드 블록은 허용합니다.
 
 변경 내용(diff):
 """
@@ -165,6 +165,12 @@ def ai_validate(
     if not isinstance(response, str) or not response.strip():
         raise ValueError("AI 생성 결과가 비어 있습니다.")
 
+    if any(
+        category(character) == "Cc" and character not in "\n\r\t"
+        for character in response
+    ):
+        raise ValueError("AI 생성 결과에 터미널 제어문자가 포함되어 있습니다.")
+
     lines = response.strip().splitlines()
     title = lines[0].strip()
 
@@ -179,13 +185,9 @@ def ai_validate(
             token.type not in {"paragraph_open", "inline", "paragraph_close"}
             for token in title_tokens
         )
-        or any(child.type != "text" for child in title_inline_tokens[0].children or [])
-        or not any(
-            unescape(child.content).strip()
-            for child in title_inline_tokens[0].children or []
-        )
+        or not _inline_token_has_content(title_inline_tokens[0])
     ):
-        raise ValueError("제목은 내용이 있는 서식 없는 한 줄이어야 합니다.")
+        raise ValueError("제목은 내용이 있는 한 줄이어야 합니다.")
 
     if len(lines) > 1 and lines[1].strip():
         raise ValueError("제목과 본문 사이에 빈 줄이 필요합니다.")
@@ -225,7 +227,7 @@ def ai_validate(
     if output_type == "pr":
         if not body:
             raise ValueError("PR 본문이 비어 있습니다.")
-        if "<!--" in body or "-->" in body:
+        if _contains_html_comment(body):
             raise ValueError("PR 본문에 숨겨진 HTML 주석을 포함할 수 없습니다.")
 
         body_lines = body.splitlines()
@@ -273,7 +275,7 @@ def ai_validate(
                 for index, line in enumerate(section_lines, start=position + 1)
                 if structural_lines[index] is not None
                 if index in list_items_with_content
-                if re.match(r"^\s*-\s+\S", line)
+                if re.match(r"^\s*-(?:\s|$)", line)
             ]
             if not bullets:
                 raise ValueError(f"'{sections[index]}' 섹션에 불릿이 필요합니다.")
@@ -302,17 +304,45 @@ def _markdown_structure(lines: list[str]) -> tuple[list[str | None], set[int]]:
             structural_lines[line_number] = lines[line_number]
         elif token.type == "inline" and _inline_token_has_content(token):
             list_items_with_content.update(list_item_stack)
+        elif token.type in {"fence", "code_block"} and _has_visible_content(token.content):
+            list_items_with_content.update(list_item_stack)
         elif token.type == "list_item_close" and list_item_stack:
             list_item_stack.pop()
     return structural_lines, list_items_with_content
 
 
+def _contains_html_comment(text: str) -> bool:
+    """Markdown에서 HTML 주석으로 해석되는 토큰이 있는지 확인합니다."""
+    tokens = MarkdownIt("commonmark", {"html": True}).parse(text)
+    return any(
+        token.type == "html_block" and "<!--" in token.content
+        or token.type == "inline"
+        and any(
+            child.type == "html_inline" and "<!--" in child.content
+            for child in token.children or []
+        )
+        for token in tokens
+    )
+
+
 def _inline_token_has_content(token: Token) -> bool:
     """화면에 표시되는 텍스트나 대체 텍스트가 있는지 확인합니다."""
     return any(
-        child.type in {"text", "code_inline", "image"}
-        and unescape(child.content).strip()
+        _inline_token_has_content(child)
+        if child.type == "image"
+        else child.type in {"text", "text_special", "code_inline"}
+        and _has_visible_content(child.content)
         for child in token.children or []
+    )
+
+
+def _has_visible_content(text: str) -> bool:
+    """공백·제어·서식·결합 문자만 있는 내용을 제외합니다."""
+    return any(
+        not character.isspace()
+        and category(character) not in {"Cc", "Cf", "Cs", "Mn", "Me"}
+        and character not in "\u115f\u1160\u2800\u3164\uffa0"
+        for character in text
     )
 
 
@@ -378,6 +408,12 @@ def ai_call_api(
                 detail = " ".join(detail.split())
                 if api_key in detail:
                     detail = detail.replace(api_key, "[REDACTED]")
+                detail = "".join(
+                    f"\\x{ord(character):02x}"
+                    if category(character) == "Cc"
+                    else character
+                    for character in detail
+                )
                 detail = detail[:200]
                 message += f" 원인: {detail}"
 
