@@ -1,10 +1,10 @@
 import argparse
+import sys
 from argparse import ArgumentParser, Namespace
 
-from . import ai_service, error_decorator, git_service
+from . import ai_service, git_service
 
 
-@error_decorator.handle_error
 def show_status(_args: Namespace) -> None:
     """현재 Git 변경 상태를 출력합니다."""
     status = git_service.git_status()
@@ -14,7 +14,6 @@ def show_status(_args: Namespace) -> None:
         print("변경 사항이 없습니다.")
 
 
-@error_decorator.handle_error
 def show_diff(_args: Namespace) -> None:
     """스테이징하지 않은 추적 파일의 변경 내용을 출력합니다."""
     diff = git_service.git_diff()
@@ -24,7 +23,6 @@ def show_diff(_args: Namespace) -> None:
         print("git diff에서 수집할 변경 내용이 없습니다.")
 
 
-@error_decorator.handle_error
 def generate_commit(args: Namespace) -> None:
     """Git 변경 내용으로 커밋 메시지 초안을 생성합니다."""
     status_result = git_service.git_status()
@@ -46,7 +44,6 @@ def generate_commit(args: Namespace) -> None:
     print(result)
 
 
-@error_decorator.handle_error
 def generate_pr(args: Namespace) -> None:
     """Git 변경 내용으로 PR 초안을 생성합니다."""
     status_result = git_service.git_status()
@@ -99,8 +96,14 @@ def build_parser() -> ArgumentParser:
 
 def main() -> None:
     """명령행 인자를 해석하고 선택된 명령 처리 함수를 실행합니다."""
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
     args = build_parser().parse_args()
-    args.handler(args)
+    try:
+        args.handler(args)
+    except (OSError, RuntimeError, ValueError) as error:
+        print(f"[ERROR] {error}", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

@@ -4,9 +4,20 @@ import subprocess
 
 def run_git(arguments: Sequence[str]) -> str:
     """현재 터미널 작업 위치에서 Git 명령을 실행합니다."""
-    result = subprocess.run(
-        ["git", *arguments], capture_output=True, text=True, check=True
-    )
+    try:
+        result = subprocess.run(
+            ["git", *arguments],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+    except subprocess.CalledProcessError as error:
+        detail = (error.stderr or error.stdout or str(error)).strip()
+        raise RuntimeError(f"Git 명령 실행에 실패했습니다: {detail}") from error
+    except UnicodeError as error:
+        raise RuntimeError("Git 결과를 UTF-8로 읽을 수 없습니다.") from error
+
     return result.stdout
 
 
