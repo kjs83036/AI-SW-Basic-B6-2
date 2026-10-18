@@ -1,5 +1,11 @@
 import os
+import re
+import sys
 from typing import Literal
+
+import truststore
+
+truststore.inject_into_ssl()
 
 import requests
 from dotenv import load_dotenv
@@ -56,10 +62,9 @@ def ai_commit(
     temperature: float,
     max_tokens: int,
     safe_mode: bool = False,
-) -> str | None:
+) -> str:
     """Git diff로 커밋 메시지 초안을 생성하고 형식을 확인합니다."""
-    if safe_mode:
-        diff = limit_diff(diff)
+    diff = _prepare_diff(diff, safe_mode)
     diff_after_prompt = ai_prompt(diff, "commit")
     return ai_generate_validated(
         diff_after_prompt, "commit", model, temperature, max_tokens
@@ -72,10 +77,9 @@ def ai_pr(
     temperature: float,
     max_tokens: int,
     safe_mode: bool = False,
-) -> str | None:
+) -> str:
     """Git diff로 PR 초안을 생성하고 형식을 확인합니다."""
-    if safe_mode:
-        diff = limit_diff(diff)
+    diff = _prepare_diff(diff, safe_mode)
     diff_after_prompt = ai_prompt(diff, "pr")
     return ai_generate_validated(
         diff_after_prompt, "pr", model, temperature, max_tokens
@@ -90,7 +94,10 @@ def ai_generate_validated(
     max_tokens: int,
 ) -> str:
     """생성 결과를 검증하고 형식 오류가 있으면 한 번 재생성합니다."""
-    response = ai_call_api(prompt, model, temperature, max_tokens)
+    call_count = 1
+    response = ai_call_api(
+        prompt, model, temperature, max_tokens, request_number=call_count
+    )
 
     try:
         return ai_validate(response, output_type)
@@ -104,11 +111,13 @@ def ai_generate_validated(
             "diff에 없는 사실은 추가하지 말고, 수정된 결과만 출력하세요."
         )
 
+        call_count += 1
         retry_response = ai_call_api(
             retry_prompt,
             model,
             temperature,
             max_tokens,
+            request_number=call_count,
         )
         return ai_validate(retry_response, output_type)
 
@@ -141,7 +150,13 @@ def ai_validate(
     if len(lines) > 1 and lines[1].strip():
         raise ValueError("제목과 본문 사이에 빈 줄이 필요합니다.")
 
-    body = "\n".join(lines[2:]).strip() if len(lines) > 1 else ""
+    body_lines = lines[2:]
+    while body_lines and not body_lines[0].strip():
+        body_lines.pop(0)
+    while body_lines and not body_lines[-1].strip():
+        body_lines.pop()
+    body = "\n".join(body_lines)
+    structural_lines = _markdown_structural_lines(body.splitlines())
     title_limit = 72 if output_type == "commit" else 80
 
     if len(title) > title_limit:
@@ -152,7 +167,10 @@ def ai_validate(
             body_lines = [line for line in body.splitlines() if line.strip()]
             if not 1 <= len(body_lines) <= 2:
                 raise ValueError("커밋 본문은 1~2개의 불릿으로 작성해야 합니다.")
-            if any(not line.lstrip().startswith("- ") for line in body_lines):
+            if any(
+                not line.startswith("- ")
+                for line in body_lines
+            ):
                 raise ValueError("커밋 본문은 불릿으로만 작성해야 합니다.")
 
         result = f"-- Commit Message --\n{title}"
@@ -169,10 +187,13 @@ def ai_validate(
         positions = []
 
         for section in sections:
+            section_pattern = re.compile(
+                rf"{re.escape(section)}(?:\s*\([^()\r\n]+\))?"
+            )
             matches = [
                 index
-                for index, line in enumerate(body_lines)
-                if line.strip() == section or line.strip().startswith(section + " ")
+                for index, line in enumerate(structural_lines)
+                if line is not None and section_pattern.fullmatch(line.strip())
             ]
             if len(matches) != 1:
                 raise ValueError(
@@ -187,8 +208,24 @@ def ai_validate(
             end = (
                 positions[index + 1] if index + 1 < len(positions) else len(body_lines)
             )
+            following_headings = [
+                line_number
+                for line_number in range(position + 1, end)
+                if structural_lines[line_number] is not None
+                and re.match(
+                    r"^\s{0,3}#{1,6}(?:\s|$)", body_lines[line_number]
+                )
+            ]
+            if following_headings:
+                end = following_headings[0]
             section_lines = body_lines[position + 1 : end]
-            if not any(line.lstrip().startswith("- ") for line in section_lines):
+            bullets = [
+                line
+                for index, line in enumerate(section_lines, start=position + 1)
+                if structural_lines[index] is not None
+                if re.match(r"^\s*-\s+\S", line)
+            ]
+            if not bullets:
                 raise ValueError(f"'{sections[index]}' 섹션에 불릿이 필요합니다.")
 
         return f"-- PR Title --\n{title}\n\n-- PR Body --\n{body}"
@@ -196,12 +233,44 @@ def ai_validate(
     raise ValueError("지원하지 않는 출력 종류입니다.")
 
 
+def _markdown_structural_lines(lines: list[str]) -> list[str | None]:
+    """코드 블록과 들여쓰기 코드의 줄을 Markdown 구조 검증에서 제외합니다."""
+    structural_lines: list[str | None] = []
+    fence_character: str | None = None
+    fence_length = 0
+
+    for line in lines:
+        if fence_character is not None:
+            closing_fence = re.match(
+                rf"^ {{0,3}}{re.escape(fence_character)}{{{fence_length},}}\s*$",
+                line,
+            )
+            structural_lines.append(None)
+            if closing_fence:
+                fence_character = None
+                fence_length = 0
+            continue
+
+        opening_fence = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+        if opening_fence:
+            fence_character = opening_fence.group(1)[0]
+            fence_length = len(opening_fence.group(1))
+            structural_lines.append(None)
+        elif line.startswith(("    ", "\t")):
+            structural_lines.append(None)
+        else:
+            structural_lines.append(line)
+
+    return structural_lines
+
+
 def ai_call_api(
     diff_after_prompt: str,
     model: str | None,
     temperature: float,
     max_tokens: int,
-) -> str | None:
+    request_number: int = 1,
+) -> str:
     """환경변수의 키와 생성 설정을 사용해 AI API를 호출합니다."""
     # 환경변수에서 가져온 API 키를 요청 인증 정보로 사용합니다.
 
@@ -219,6 +288,7 @@ def ai_call_api(
         raise ValueError("API_KEY is not set in the environment variables.")
 
     try:
+        print(f"[INFO] AI API 요청: {request_number}회", file=sys.stderr)
         response = requests.post(
             "https://copa.codyssey.kr/v1/chat/completions",
             headers={"Authorization": f"Bearer {api_key}"},
@@ -248,6 +318,11 @@ def ai_call_api(
     except requests.exceptions.Timeout as error:
         raise RuntimeError("API 요청 시간이 초과되었습니다.") from error
 
+    except requests.exceptions.SSLError as error:
+        raise RuntimeError(
+            "API TLS 인증서 검증에 실패했습니다. 운영체제의 인증서 저장소를 확인하세요."
+        ) from error
+
     except requests.exceptions.ConnectionError as error:
         raise RuntimeError(
             "API 서버에 연결할 수 없습니다. 네트워크와 서버 주소를 확인하세요."
@@ -256,7 +331,15 @@ def ai_call_api(
     except requests.RequestException as error:
         raise RuntimeError("API 요청 처리 중 오류가 발생했습니다.") from error
 
-    return response.json()["choices"][0]["message"]["content"]
+    try:
+        content = response.json()["choices"][0]["message"]["content"]
+    except (IndexError, KeyError, TypeError, ValueError):
+        raise RuntimeError("AI API 응답 형식이 올바르지 않습니다.") from None
+
+    if not isinstance(content, str):
+        raise RuntimeError("AI API 응답 형식이 올바르지 않습니다.")
+
+    return content
 
 
 def limit_diff(diff: str) -> str:
@@ -267,3 +350,18 @@ def limit_diff(diff: str) -> str:
         return diff
 
     return "\n".join(lines[:200]) + "\n\n[Diff truncated: limited to 200 lines.]"
+
+
+def _prepare_diff(diff: str, safe_mode: bool) -> str:
+    """안전모드 적용 여부를 알리고 API에 전달할 diff를 준비합니다."""
+    if not safe_mode:
+        return diff
+
+    source_line_count = len(diff.splitlines())
+    limited_diff = limit_diff(diff)
+    print(
+        f"[INFO] 안전모드: 원본 {source_line_count}줄, "
+        f"전송하는 원문 최대 {min(source_line_count, 200)}줄",
+        file=sys.stderr,
+    )
+    return limited_diff
