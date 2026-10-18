@@ -2,9 +2,7 @@ import argparse
 from argparse import ArgumentParser, Namespace
 
 # 구현 예정: 패키지 실행 시 내부 모듈을 상대 경로로 불러오도록 연결합니다.
-import ai_service
-import error_decorator
-import git_service
+from . import ai_service, error_decorator, git_service
 
 
 @error_decorator.handle_error
@@ -30,6 +28,10 @@ def show_diff(_args: Namespace) -> None:
 @error_decorator.handle_error
 def generate_commit(args: Namespace) -> None:
     """Git 변경 내용으로 커밋 메시지 초안을 생성합니다."""
+    status_result = git_service.git_status()
+    if not status_result:
+        print("변경 사항이 없습니다. 커밋 메시지를 생성할 수 없습니다.")
+        return
     diff = git_service.git_diff()
     if not diff:
         print("git diff에서 수집할 변경 내용이 없습니다.")
@@ -48,6 +50,11 @@ def generate_commit(args: Namespace) -> None:
 @error_decorator.handle_error
 def generate_pr(args: Namespace) -> None:
     """Git 변경 내용으로 PR 초안을 생성합니다."""
+    status_result = git_service.git_status()
+    if not status_result:
+        print("변경 사항이 없습니다. PR 초안을 생성할 수 없습니다.")
+        return
+
     diff = git_service.git_diff()
     if not diff:
         print("git diff에서 수집할 변경 내용이 없습니다.")
