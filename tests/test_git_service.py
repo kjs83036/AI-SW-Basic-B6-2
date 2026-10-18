@@ -45,17 +45,35 @@ def test_invalid_git_output_encoding_has_actionable_error(
         git_service.run_git(["diff"])
 
 
+def test_git_diff_reports_cp949_content_encoding_error(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CP949 변경 내용은 빈 diff가 아니라 명확한 인코딩 오류를 반환합니다."""
+    target = git_repo / "app.py"
+    target.write_bytes("기준 내용\n".encode("cp949"))
+    subprocess.run(["git", "-C", str(git_repo), "add", "app.py"], check=True)
+    subprocess.run(
+        ["git", "-C", str(git_repo), "commit", "--quiet", "-m", "기준 상태"],
+        check=True,
+    )
+    target.write_bytes("수정 내용\n".encode("cp949"))
+    monkeypatch.chdir(git_repo)
+
+    with pytest.raises(RuntimeError, match="UTF-8로 읽을 수 없습니다"):
+        git_service.git_diff()
+
+
 def test_git_output_is_explicitly_decoded_as_utf8(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Git subprocess에 UTF-8 출력 인코딩을 전달합니다."""
     received: dict[str, object] = {}
 
-    def run_git(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+    def run_git(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
         received.update(kwargs)
-        return subprocess.CompletedProcess(args[0], 0, "한글", "")
+        return subprocess.CompletedProcess(args[0], 0, "한글".encode("utf-8"), b"")
 
     monkeypatch.setattr(git_service.subprocess, "run", run_git)
 
     assert git_service.run_git(["status"]) == "한글"
-    assert received["encoding"] == "utf-8"
+    assert "text" not in received

@@ -50,6 +50,13 @@ def test_commit_title_only_is_valid() -> None:
     assert ai_service.ai_validate("수정된 내용을 반영합니다", "commit")
 
 
+@pytest.mark.parametrize("separator", ["- - -", "- ---", "- \t- \t-"])
+def test_commit_rejects_thematic_break_as_body(separator: str) -> None:
+    """커밋 본문에서도 내용 없는 구분선을 변경 요약으로 인정하지 않습니다."""
+    with pytest.raises(ValueError, match="불릿으로만"):
+        ai_service.ai_validate(f"커밋 제목\n\n{separator}", "commit")
+
+
 def test_commit_body_requires_one_or_two_bullets() -> None:
     """커밋 본문이 있다면 한 개 또는 두 개의 내용 있는 불릿을 요구합니다."""
     assert ai_service.ai_validate("수정\n\n- 변경 사항", "commit")
@@ -57,6 +64,9 @@ def test_commit_body_requires_one_or_two_bullets() -> None:
 
     with pytest.raises(ValueError, match="1~2개의 불릿"):
         ai_service.ai_validate("수정\n\n- 1\n- 2\n- 3", "commit")
+
+    with pytest.raises(ValueError, match="내용 있는 불릿"):
+        ai_service.ai_validate("수정\n\n- \n- 실제 변경", "commit")
 
 
 def test_pr_accepts_required_bilingual_headings() -> None:
@@ -70,12 +80,101 @@ def test_pr_accepts_required_bilingual_headings() -> None:
     assert ai_service.ai_validate(response, "pr")
 
 
+@pytest.mark.parametrize("separator", ["- - -", "- ---", "- \t- \t-"])
+def test_pr_rejects_thematic_breaks_as_required_bullets(separator: str) -> None:
+    """구분선은 필수 섹션의 불릿을 대신할 수 없습니다."""
+    response = pr_response().replace("- 변경 배경", separator)
+    with pytest.raises(ValueError, match="Why.*불릿"):
+        ai_service.ai_validate(response, "pr")
+
+
+@pytest.mark.parametrize("tag", ["span", "x-pr", 'span data-note="a>b"'])
+def test_pr_rejects_sections_inside_general_html_blocks(tag: str) -> None:
+    """일반 태그의 HTML 블록 내부 문자열도 실제 섹션으로 세지 않습니다."""
+    response = (
+        f"PR 초안\n\n<{tag}>\n"
+        "## Why\n- 배경\n## What\n- 변경\n## How to Test\n- 미실행\n"
+        f"</{tag.split()[0]}>"
+    )
+    with pytest.raises(ValueError, match="Why.*섹션"):
+        ai_service.ai_validate(response, "pr")
+
+
+def test_pr_accepts_real_sections_after_html_block_ends() -> None:
+    """HTML 블록이 빈 줄에서 끝난 뒤의 실제 Markdown 섹션은 허용합니다."""
+    response = pr_response().replace("\n\n## Why", "\n\n<span>설명</span>\n\n## Why")
+    assert ai_service.ai_validate(response, "pr")
+
+
+@pytest.mark.parametrize(
+    "invalid_response",
+    [
+        pr_response().replace("- 변경 배경", "- - -"),
+        "PR 초안\n\n<span>\n## Why\n- 배경\n## What\n- 변경\n## How to Test\n- 미실행\n</span>",
+    ],
+)
+def test_pr_regenerates_invalid_markdown_once(
+    invalid_response: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """불릿·섹션이 없는 응답을 그대로 출력하지 않고 한 번 재생성합니다."""
+    api_call = Mock(side_effect=[invalid_response, pr_response()])
+    monkeypatch.setattr(ai_service, "ai_call_api", api_call)
+    result = ai_service.ai_pr("+ 변경", None, 0.2, 500)
+    assert result.endswith(pr_response().split("\n\n", 1)[1])
+    assert api_call.call_count == 2
+
+
+def test_pr_accepts_bullets_under_nested_headings() -> None:
+    """필수 섹션 아래의 하위 제목과 불릿을 허용합니다."""
+    response = pr_response().replace(
+        "## Why\n- 변경 배경", "## Why\n### 배경 설명\n- 변경 배경"
+    )
+
+    assert ai_service.ai_validate(response, "pr")
+
+
+@pytest.mark.parametrize("underline", ["---", "==="])
+def test_pr_does_not_borrow_bullets_after_setext_section(underline: str) -> None:
+    """다른 H1·H2 제목 뒤의 불릿은 비어 있는 필수 섹션에 귀속하지 않습니다."""
+    response = pr_response().replace(
+        "## Why\n- 변경 배경", f"## Why\n\nExtra\n{underline}\n- 무관한 불릿"
+    )
+    with pytest.raises(ValueError, match="Why.*불릿"):
+        ai_service.ai_validate(response, "pr")
+
+
+@pytest.mark.parametrize("heading", ["## Why ##", "Why\n---"])
+def test_pr_accepts_equivalent_markdown_h2_forms(heading: str) -> None:
+    """동일한 H2 구조인 닫는 해시와 밑줄 제목 표기도 허용합니다."""
+    assert ai_service.ai_validate(pr_response().replace("## Why", heading), "pr")
+
+
+@pytest.mark.parametrize("tag", ["pre", "div"])
+def test_pr_does_not_count_html_block_content(
+    tag: str,
+) -> None:
+    """HTML 블록 안의 제목과 불릿을 PR 구조로 인정하지 않습니다."""
+    response = "\n".join(
+        [
+            "PR 초안",
+            "",
+            f"<{tag}>",
+            *pr_response().splitlines()[2:],
+            f"</{tag}>",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="Why.*섹션"):
+        ai_service.ai_validate(response, "pr")
+
+
 @pytest.mark.parametrize(
     "response",
     [
         pr_response().replace("## What", "## Other"),
         pr_response() + "\n## Why\n- 중복 섹션",
         pr_response().replace("- 변경 배경", "- "),
+        "PR 초안\n\n<!--\n## Why\n- 변경 배경\n## What\n- 변경 내용\n## How to Test\n- 테스트 미실행\n-->",
         pr_response()
         .replace("- 변경 배경", "")
         .replace("## What", "## Extra\n- 무관한 불릿\n\n## What"),
@@ -141,6 +240,67 @@ def test_invalid_response_retries_once(monkeypatch: pytest.MonkeyPatch) -> None:
         "diff", "commit", None, 0.2, 500
     ).startswith("-- Commit Message --")
     assert api_call.call_count == 2
+
+
+@pytest.mark.parametrize("finish_reason", ["length", "max_tokens"])
+def test_token_limited_response_retries_once(
+    finish_reason: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """토큰 한도로 잘린 API 응답은 한 번 재요청하고 완성본을 검증합니다."""
+    truncated_response = Mock()
+    truncated_response.json.return_value = {
+        "choices": [
+            {
+                "finish_reason": finish_reason,
+                "message": {"content": "feat: 불완전한 커밋 제목"},
+            }
+        ]
+    }
+    valid_response = Mock()
+    valid_response.json.return_value = {
+        "choices": [
+            {
+                "finish_reason": "stop",
+                "message": {"content": "완성된 커밋 제목"},
+            }
+        ]
+    }
+    post = Mock(side_effect=[truncated_response, valid_response])
+    monkeypatch.setattr(ai_service, "load_dotenv", lambda: None)
+    monkeypatch.setenv("API_KEY", "TEST_ONLY_KEY")
+    monkeypatch.setattr(ai_service.requests, "post", post)
+
+    result = ai_service.ai_commit("+ 변경 내용", None, 0.2, 500)
+
+    assert "완성된 커밋 제목" in result
+    assert post.call_count == 2
+    retry_prompt = post.call_args_list[1].kwargs["json"]["messages"][0]["content"]
+    assert "토큰 한도" in retry_prompt
+    assert "불완전한 커밋 제목" not in retry_prompt
+
+
+def test_token_limited_retry_stops_after_second_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """재요청도 토큰 한도에 도달하면 세 번째 호출 없이 원인을 반환합니다."""
+    truncated_response = Mock()
+    truncated_response.json.return_value = {
+        "choices": [
+            {
+                "finish_reason": "length",
+                "message": {"content": "불완전한 제목"},
+            }
+        ]
+    }
+    post = Mock(return_value=truncated_response)
+    monkeypatch.setattr(ai_service, "load_dotenv", lambda: None)
+    monkeypatch.setenv("API_KEY", "TEST_ONLY_KEY")
+    monkeypatch.setattr(ai_service.requests, "post", post)
+
+    with pytest.raises(RuntimeError, match="재생성 응답도 토큰 한도"):
+        ai_service.ai_commit("+ 변경 내용", None, 0.2, 500)
+
+    assert post.call_count == 2
 
 
 def test_two_invalid_responses_stop_after_retry(

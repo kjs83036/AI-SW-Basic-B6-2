@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 CLI_BOOTSTRAP = """
 import json
@@ -66,6 +68,27 @@ def test_non_git_directory_exits_with_error(
     assert "[ERROR]" in result.stderr
     assert "Git 명령 실행에 실패했습니다" in result.stderr
     assert result.stdout == ""
+
+
+def test_cli_reports_cp949_diff_instead_of_clean_repository(
+    git_repo: Path, isolated_cli_environment: dict[str, str]
+) -> None:
+    """CP949 diff 디코딩 실패는 정상 종료나 변경 없음으로 표시하지 않습니다."""
+    target = git_repo / "app.py"
+    target.write_bytes("기준 내용\n".encode("cp949"))
+    subprocess.run(["git", "-C", str(git_repo), "add", "app.py"], check=True)
+    subprocess.run(
+        ["git", "-C", str(git_repo), "commit", "--quiet", "-m", "기준 상태"],
+        check=True,
+    )
+    target.write_bytes("수정 내용\n".encode("cp949"))
+
+    result = run_cli(git_repo, isolated_cli_environment, "commit")
+
+    assert result.returncode == 1
+    assert "[ERROR]" in result.stderr
+    assert "UTF-8로 읽을 수 없습니다" in result.stderr
+    assert "변경 사항이 없습니다" not in result.stdout
 
 
 def test_diff_cli_prints_emoji_with_utf8_when_parent_uses_cp949(
@@ -157,3 +180,56 @@ def test_cli_logs_both_api_attempts_after_format_retry(
     assert result.returncode == 0, result.stderr
     assert "AI API 요청: 1회" in result.stderr
     assert "AI API 요청: 2회" in result.stderr
+
+
+@pytest.mark.parametrize("command", ["commit", "pr"])
+@pytest.mark.parametrize(
+    ("option", "value", "message"),
+    [
+        ("--temperature", "nan", "유한한 실수"),
+        ("--temperature", "inf", "유한한 실수"),
+        ("--temperature", "-inf", "유한한 실수"),
+        ("--temperature", "abc", "유한한 실수"),
+        ("--max-tokens", "0", "양의 정수"),
+        ("--max-tokens", "-1", "양의 정수"),
+        ("--max-tokens", "1.5", "양의 정수"),
+    ],
+)
+def test_invalid_generation_options_fail_before_request(
+    git_repo: Path,
+    isolated_cli_environment: dict[str, str],
+    command: str,
+    option: str,
+    value: str,
+    message: str,
+) -> None:
+    """잘못된 생성 옵션은 API 호출 전에 옵션 오류 코드 2로 거부합니다."""
+    (git_repo / "app.py").write_text("value = 2\n", encoding="utf-8")
+    result = run_cli(git_repo, isolated_cli_environment, command, f"{option}={value}")
+    assert result.returncode == 2
+    assert option in result.stderr
+    assert message in result.stderr
+    assert "AI API 요청:" not in result.stderr
+    assert result.stdout == ""
+
+
+@pytest.mark.parametrize("command", ["commit", "pr"])
+def test_generation_accepts_zero_temperature_and_one_token_setting(
+    git_repo: Path,
+    isolated_cli_environment: dict[str, str],
+    command: str,
+) -> None:
+    """유효한 경계 설정은 모의 응답을 이용해 정상 생성할 수 있습니다."""
+    (git_repo / "app.py").write_text("value = 2\n", encoding="utf-8")
+    isolated_cli_environment["API_KEY"] = "TEST_ONLY_KEY"
+    draft = (
+        "PR 초안\n\n## Why\n- 배경\n\n## What\n- 변경\n\n## How to Test\n- 미실행"
+        if command == "pr" else "변경 반영"
+    )
+    isolated_cli_environment["TEST_API_RESPONSES"] = json.dumps([draft])
+    result = run_cli(
+        git_repo, isolated_cli_environment, command,
+        "--temperature=0", "--max-tokens=1",
+    )
+    assert result.returncode == 0, result.stderr
+    assert "AI API 요청: 1회" in result.stderr

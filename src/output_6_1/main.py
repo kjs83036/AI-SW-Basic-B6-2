@@ -1,4 +1,5 @@
 import argparse
+import math
 import sys
 from argparse import ArgumentParser, Namespace
 
@@ -66,6 +67,28 @@ def generate_pr(args: Namespace) -> None:
     print(result)
 
 
+def finite_temperature(value: str) -> float:
+    """JSON으로 전송할 수 있는 유한한 실수만 허용합니다."""
+    try:
+        temperature = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("유한한 실수를 입력하세요.") from None
+    if not math.isfinite(temperature):
+        raise argparse.ArgumentTypeError("유한한 실수를 입력하세요.")
+    return temperature
+
+
+def positive_token_count(value: str) -> int:
+    """최대 생성 토큰 수는 양의 정수만 허용합니다."""
+    try:
+        token_count = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("양의 정수를 입력하세요.") from None
+    if token_count <= 0:
+        raise argparse.ArgumentTypeError("양의 정수를 입력하세요.")
+    return token_count
+
+
 def build_parser() -> ArgumentParser:
     """CLI 명령과 AI 생성 옵션을 정의한 파서를 구성합니다."""
     parser = argparse.ArgumentParser(
@@ -86,8 +109,8 @@ def build_parser() -> ArgumentParser:
     for command, handler, help_text in commands:
         command_parser = subparsers.add_parser(command, help=help_text)
         command_parser.add_argument("--model", default=None)
-        command_parser.add_argument("--temperature", type=float, default=0.2)
-        command_parser.add_argument("--max-tokens", type=int, default=500)
+        command_parser.add_argument("--temperature", type=finite_temperature, default=0.2)
+        command_parser.add_argument("--max-tokens", type=positive_token_count, default=500)
         command_parser.add_argument("--safe-mode", action="store_true")
         command_parser.set_defaults(handler=handler)
 

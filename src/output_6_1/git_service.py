@@ -8,17 +8,23 @@ def run_git(arguments: Sequence[str]) -> str:
         result = subprocess.run(
             ["git", *arguments],
             capture_output=True,
-            text=True,
-            encoding="utf-8",
             check=True,
         )
     except subprocess.CalledProcessError as error:
-        detail = (error.stderr or error.stdout or str(error)).strip()
+        raw_detail = error.stderr or error.stdout
+        detail = (
+            raw_detail.decode("utf-8", errors="replace").strip()
+            if isinstance(raw_detail, bytes)
+            else str(error)
+        )
         raise RuntimeError(f"Git 명령 실행에 실패했습니다: {detail}") from error
     except UnicodeError as error:
         raise RuntimeError("Git 결과를 UTF-8로 읽을 수 없습니다.") from error
 
-    return result.stdout
+    try:
+        return result.stdout.decode("utf-8")
+    except UnicodeError as error:
+        raise RuntimeError("Git 결과를 UTF-8로 읽을 수 없습니다.") from error
 
 
 def git_status() -> str:

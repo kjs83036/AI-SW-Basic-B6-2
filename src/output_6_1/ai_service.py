@@ -9,6 +9,7 @@ truststore.inject_into_ssl()
 
 import requests
 from dotenv import load_dotenv
+from markdown_it import MarkdownIt
 
 COMMIT_PROMPT = """다음 Git diff를 바탕으로 한국어 커밋 메시지를 작성하세요.
 
@@ -56,6 +57,10 @@ PR 제목 한 줄
 """
 
 
+class IncompleteResponseError(RuntimeError):
+    """API가 토큰 한도에 도달해 생성을 끝낸 응답을 나타냅니다."""
+
+
 def ai_commit(
     diff: str,
     model: str | None,
@@ -95,23 +100,38 @@ def ai_generate_validated(
 ) -> str:
     """생성 결과를 검증하고 형식 오류가 있으면 한 번 재생성합니다."""
     call_count = 1
-    response = ai_call_api(
-        prompt, model, temperature, max_tokens, request_number=call_count
+    try:
+        response = ai_call_api(
+            prompt, model, temperature, max_tokens, request_number=call_count
+        )
+    except IncompleteResponseError as error:
+        response = None
+        validation_error = error
+    else:
+        try:
+            return ai_validate(response, output_type)
+        except ValueError as error:
+            validation_error = error
+
+    retry_context = (
+        f"앞선 출력:\n{response}\n\n" if response is not None else ""
+    )
+    retry_reason = (
+        "API 응답이 토큰 한도에 도달해 일부만 생성되었습니다."
+        if response is None
+        else "앞선 출력의 형식 검증이 실패했습니다."
+    )
+    retry_prompt = (
+        f"{prompt}\n\n"
+        f"{retry_reason}\n"
+        f"실패 사유: {validation_error}\n\n"
+        f"{retry_context}"
+        "실패 사유를 수정해 초안 전체를 다시 작성하세요. "
+        "diff에 없는 사실은 추가하지 말고, 수정된 결과만 출력하세요."
     )
 
+    call_count += 1
     try:
-        return ai_validate(response, output_type)
-    except ValueError as error:
-        retry_prompt = (
-            f"{prompt}\n\n"
-            "앞선 출력이 형식 검증에서 실패했습니다.\n"
-            f"실패 사유: {error}\n\n"
-            f"앞선 출력:\n{response}\n\n"
-            "실패 사유를 수정해 초안 전체를 다시 작성하세요. "
-            "diff에 없는 사실은 추가하지 말고, 수정된 결과만 출력하세요."
-        )
-
-        call_count += 1
         retry_response = ai_call_api(
             retry_prompt,
             model,
@@ -119,7 +139,9 @@ def ai_generate_validated(
             max_tokens,
             request_number=call_count,
         )
-        return ai_validate(retry_response, output_type)
+    except IncompleteResponseError:
+        raise RuntimeError("AI API 재생성 응답도 토큰 한도에 도달했습니다.") from None
+    return ai_validate(retry_response, output_type)
 
 
 def ai_prompt(diff: str, output_type: Literal["commit", "pr"]) -> str:
@@ -168,10 +190,13 @@ def ai_validate(
             if not 1 <= len(body_lines) <= 2:
                 raise ValueError("커밋 본문은 1~2개의 불릿으로 작성해야 합니다.")
             if any(
-                not line.startswith("- ")
-                for line in body_lines
+                structural_lines[index] is None
+                or not line.startswith("- ")
+                or not line[2:].strip()
+                for index, line in enumerate(body.splitlines())
+                if line.strip()
             ):
-                raise ValueError("커밋 본문은 불릿으로만 작성해야 합니다.")
+                raise ValueError("커밋 본문은 내용 있는 불릿으로만 작성해야 합니다.")
 
         result = f"-- Commit Message --\n{title}"
         if body:
@@ -181,6 +206,8 @@ def ai_validate(
     if output_type == "pr":
         if not body:
             raise ValueError("PR 본문이 비어 있습니다.")
+        if "<!--" in body or "-->" in body:
+            raise ValueError("PR 본문에 숨겨진 HTML 주석을 포함할 수 없습니다.")
 
         body_lines = body.splitlines()
         sections = ["## Why", "## What", "## How to Test"]
@@ -212,9 +239,12 @@ def ai_validate(
                 line_number
                 for line_number in range(position + 1, end)
                 if structural_lines[line_number] is not None
-                and re.match(
-                    r"^\s{0,3}#{1,6}(?:\s|$)", body_lines[line_number]
+                and (
+                    heading := re.match(
+                        r"^(#{1,6})(?:\s|$)", structural_lines[line_number]
+                    )
                 )
+                and len(heading.group(1)) <= 2
             ]
             if following_headings:
                 end = following_headings[0]
@@ -234,33 +264,17 @@ def ai_validate(
 
 
 def _markdown_structural_lines(lines: list[str]) -> list[str | None]:
-    """코드 블록과 들여쓰기 코드의 줄을 Markdown 구조 검증에서 제외합니다."""
-    structural_lines: list[str | None] = []
-    fence_character: str | None = None
-    fence_length = 0
-
-    for line in lines:
-        if fence_character is not None:
-            closing_fence = re.match(
-                rf"^ {{0,3}}{re.escape(fence_character)}{{{fence_length},}}\s*$",
-                line,
+    """실제 제목은 표준 표기로 정규화하고 목록 항목의 원문 줄을 남깁니다."""
+    structural_lines: list[str | None] = [None] * len(lines)
+    tokens = MarkdownIt("commonmark").parse("\n".join(lines))
+    for index, token in enumerate(tokens):
+        is_heading = token.type == "heading_open" and token.level == 0
+        if (is_heading or token.type == "list_item_open") and token.map:
+            line_number = token.map[0]
+            structural_lines[line_number] = (
+                f"{'#' * int(token.tag[1:])} {tokens[index + 1].content}"
+                if is_heading else lines[line_number]
             )
-            structural_lines.append(None)
-            if closing_fence:
-                fence_character = None
-                fence_length = 0
-            continue
-
-        opening_fence = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
-        if opening_fence:
-            fence_character = opening_fence.group(1)[0]
-            fence_length = len(opening_fence.group(1))
-            structural_lines.append(None)
-        elif line.startswith(("    ", "\t")):
-            structural_lines.append(None)
-        else:
-            structural_lines.append(line)
-
     return structural_lines
 
 
@@ -332,7 +346,17 @@ def ai_call_api(
         raise RuntimeError("API 요청 처리 중 오류가 발생했습니다.") from error
 
     try:
-        content = response.json()["choices"][0]["message"]["content"]
+        choice = response.json()["choices"][0]
+        if isinstance(choice, dict) and choice.get("finish_reason") in (
+            "length",
+            "max_tokens",
+        ):
+            raise IncompleteResponseError(
+                "AI API 응답이 토큰 한도에 도달해 일부만 생성되었습니다."
+            )
+        content = choice["message"]["content"]
+    except IncompleteResponseError:
+        raise
     except (IndexError, KeyError, TypeError, ValueError):
         raise RuntimeError("AI API 응답 형식이 올바르지 않습니다.") from None
 
