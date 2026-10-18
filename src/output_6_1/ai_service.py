@@ -4,9 +4,6 @@ from typing import Literal
 import requests
 from dotenv import load_dotenv
 
-# 구현 예정: diff를 반영하고 제목·본문 작성 규칙을 안내하는 프롬프트를 작성합니다.
-# 구현 예정: Why, What, How to Test 섹션과 각 섹션의 불릿 규칙을 포함합니다.
-
 COMMIT_PROMPT = """다음 Git diff를 바탕으로 한국어 커밋 메시지를 작성하세요.
 
 출력 형식:
@@ -118,7 +115,6 @@ def ai_generate_validated(
 
 def ai_prompt(diff: str, output_type: Literal["commit", "pr"]) -> str:
     """출력 종류에 맞는 프롬프트를 선택합니다."""
-    # 구현 예정: 선택한 프롬프트에 diff와 출력 형식 지침을 함께 구성합니다.
     if output_type == "pr":
         prompt = PR_PROMPT + diff
 
@@ -128,9 +124,6 @@ def ai_prompt(diff: str, output_type: Literal["commit", "pr"]) -> str:
     return prompt
 
 
-# 구현 예정: 커밋 제목은 최대 72자, PR 제목은 최대 80자로 확인합니다.
-# 구현 예정: PR 본문에 세 필수 섹션과 섹션별 불릿이 있는지 확인합니다.
-# 구현 예정: 규칙 위반 시 재생성 또는 후처리하는 방식을 선택합니다.
 def ai_validate(
     response: str | None,
     output_type: Literal["commit", "pr"],
@@ -210,10 +203,7 @@ def ai_call_api(
     max_tokens: int,
 ) -> str | None:
     """환경변수의 키와 생성 설정을 사용해 AI API를 호출합니다."""
-    # .env 파일에서 읽은 API 키를 요청 인증 정보로 사용합니다.
-    # 구현 예정: API_KEY 누락을 호출 전에 확인하고 키 값은 오류 메시지에 노출하지 않습니다.
-    # 구현 예정: HTTP 상태 코드와 네트워크·인증 오류를 확인해 원인을 안내합니다.
-    # 구현 예정: 요청 시간 제한을 설정하고 응답에 예상한 생성 결과가 있는지 확인합니다.
+    # 환경변수에서 가져온 API 키를 요청 인증 정보로 사용합니다.
 
     if not model or model == "gemini":
         model = "gemini-3.1-flash-lite"
@@ -271,7 +261,7 @@ def ai_call_api(
 
 def limit_diff(diff: str) -> str:
     """안전모드에서 API에 전달할 diff의 크기를 제한합니다."""
-    # 최대 200줄 제한
+    # 200줄을 넘으면 앞부분만 남겨 전송량을 제한합니다.
     lines = diff.splitlines()
     if len(lines) <= 200:
         return diff

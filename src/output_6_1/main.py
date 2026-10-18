@@ -1,7 +1,6 @@
 import argparse
 from argparse import ArgumentParser, Namespace
 
-# 구현 예정: 패키지 실행 시 내부 모듈을 상대 경로로 불러오도록 연결합니다.
 from . import ai_service, error_decorator, git_service
 
 
