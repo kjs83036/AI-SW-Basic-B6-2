@@ -1,3 +1,4 @@
+from html import unescape
 import os
 import re
 import sys
@@ -10,6 +11,7 @@ truststore.inject_into_ssl()
 import requests
 from dotenv import load_dotenv
 from markdown_it import MarkdownIt
+from markdown_it.token import Token
 
 COMMIT_PROMPT = """다음 Git diff를 바탕으로 한국어 커밋 메시지를 작성하세요.
 
@@ -169,6 +171,16 @@ def ai_validate(
     if not title:
         raise ValueError("제목이 비어 있습니다.")
 
+    title_tokens = MarkdownIt("commonmark").parse(title)
+    if (
+        not any(token.type == "inline" for token in title_tokens)
+        or any(
+            token.type not in {"paragraph_open", "inline", "paragraph_close"}
+            for token in title_tokens
+        )
+    ):
+        raise ValueError("제목은 서식 없는 한 줄이어야 합니다.")
+
     if len(lines) > 1 and lines[1].strip():
         raise ValueError("제목과 본문 사이에 빈 줄이 필요합니다.")
 
@@ -178,7 +190,7 @@ def ai_validate(
     while body_lines and not body_lines[-1].strip():
         body_lines.pop()
     body = "\n".join(body_lines)
-    structural_lines = _markdown_structural_lines(body.splitlines())
+    structural_lines, list_items_with_content = _markdown_structure(body.splitlines())
     title_limit = 72 if output_type == "commit" else 80
 
     if len(title) > title_limit:
@@ -191,6 +203,7 @@ def ai_validate(
                 raise ValueError("커밋 본문은 1~2개의 불릿으로 작성해야 합니다.")
             if any(
                 structural_lines[index] is None
+                or index not in list_items_with_content
                 or not line.startswith("- ")
                 or not line[2:].strip()
                 for index, line in enumerate(body.splitlines())
@@ -253,6 +266,7 @@ def ai_validate(
                 line
                 for index, line in enumerate(section_lines, start=position + 1)
                 if structural_lines[index] is not None
+                if index in list_items_with_content
                 if re.match(r"^\s*-\s+\S", line)
             ]
             if not bullets:
@@ -263,19 +277,37 @@ def ai_validate(
     raise ValueError("지원하지 않는 출력 종류입니다.")
 
 
-def _markdown_structural_lines(lines: list[str]) -> list[str | None]:
-    """실제 제목은 표준 표기로 정규화하고 목록 항목의 원문 줄을 남깁니다."""
+def _markdown_structure(lines: list[str]) -> tuple[list[str | None], set[int]]:
+    """실제 Markdown 제목과 내용이 있는 목록 항목의 줄 번호를 찾습니다."""
     structural_lines: list[str | None] = [None] * len(lines)
+    list_items_with_content: set[int] = set()
     tokens = MarkdownIt("commonmark").parse("\n".join(lines))
+    list_item_stack: list[int] = []
     for index, token in enumerate(tokens):
         is_heading = token.type == "heading_open" and token.level == 0
-        if (is_heading or token.type == "list_item_open") and token.map:
+        if is_heading and token.map:
             line_number = token.map[0]
             structural_lines[line_number] = (
                 f"{'#' * int(token.tag[1:])} {tokens[index + 1].content}"
-                if is_heading else lines[line_number]
             )
-    return structural_lines
+        elif token.type == "list_item_open" and token.map:
+            line_number = token.map[0]
+            list_item_stack.append(line_number)
+            structural_lines[line_number] = lines[line_number]
+        elif token.type == "inline" and _inline_token_has_content(token):
+            list_items_with_content.update(list_item_stack)
+        elif token.type == "list_item_close" and list_item_stack:
+            list_item_stack.pop()
+    return structural_lines, list_items_with_content
+
+
+def _inline_token_has_content(token: Token) -> bool:
+    """화면에 표시되는 텍스트나 대체 텍스트가 있는지 확인합니다."""
+    return any(
+        child.type in {"text", "code_inline", "image"}
+        and unescape(child.content).strip()
+        for child in token.children or []
+    )
 
 
 def ai_call_api(
@@ -326,6 +358,21 @@ def ai_call_api(
             message = "API 서버에서 오류가 발생했습니다."
         else:
             message = f"API 요청이 실패했습니다. 상태 코드: {status_code}"
+
+        if error.response is not None:
+            try:
+                payload = error.response.json()
+            except ValueError:
+                payload = None
+            api_error = payload.get("error") if isinstance(payload, dict) else None
+            detail = api_error.get("message") if isinstance(api_error, dict) else None
+            if not isinstance(detail, str) and isinstance(payload, dict):
+                detail = payload.get("message")
+            if isinstance(detail, str) and detail.strip():
+                detail = " ".join(detail.split())[:200]
+                if api_key in detail:
+                    detail = detail.replace(api_key, "[REDACTED]")
+                message += f" 원인: {detail}"
 
         raise RuntimeError(message) from None
 

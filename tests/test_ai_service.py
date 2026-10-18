@@ -69,6 +69,20 @@ def test_commit_body_requires_one_or_two_bullets() -> None:
         ai_service.ai_validate("수정\n\n- \n- 실제 변경", "commit")
 
 
+@pytest.mark.parametrize("bullet", ["- -", "- <span></span>", "- ** **"])
+def test_commit_rejects_bullets_without_visible_content(bullet: str) -> None:
+    """화면에 표시되는 내용이 없는 목록은 커밋 요약으로 인정하지 않습니다."""
+    with pytest.raises(ValueError, match="내용 있는 불릿"):
+        ai_service.ai_validate(f"수정\n\n{bullet}", "commit")
+
+
+@pytest.mark.parametrize("title", ["```markdown", "## 제목", "---"])
+def test_commit_rejects_markdown_formatting_as_title(title: str) -> None:
+    """Markdown 서식 토큰만 있는 줄은 커밋 제목으로 인정하지 않습니다."""
+    with pytest.raises(ValueError, match="서식 없는 한 줄"):
+        ai_service.ai_validate(title, "commit")
+
+
 def test_pr_accepts_required_bilingual_headings() -> None:
     """영문 헤더와 요구서에 기재된 한글 병기 형식을 모두 허용합니다."""
     response = pr_response().replace(
@@ -84,6 +98,14 @@ def test_pr_accepts_required_bilingual_headings() -> None:
 def test_pr_rejects_thematic_breaks_as_required_bullets(separator: str) -> None:
     """구분선은 필수 섹션의 불릿을 대신할 수 없습니다."""
     response = pr_response().replace("- 변경 배경", separator)
+    with pytest.raises(ValueError, match="Why.*불릿"):
+        ai_service.ai_validate(response, "pr")
+
+
+@pytest.mark.parametrize("bullet", ["- -", "- <span></span>", "- ** **"])
+def test_pr_rejects_bullets_without_visible_content(bullet: str) -> None:
+    """내용이 보이지 않는 목록 항목은 PR 섹션의 불릿으로 인정하지 않습니다."""
+    response = pr_response().replace("- 변경 배경", bullet)
     with pytest.raises(ValueError, match="Why.*불릿"):
         ai_service.ai_validate(response, "pr")
 
@@ -120,6 +142,20 @@ def test_pr_regenerates_invalid_markdown_once(
     api_call = Mock(side_effect=[invalid_response, pr_response()])
     monkeypatch.setattr(ai_service, "ai_call_api", api_call)
     result = ai_service.ai_pr("+ 변경", None, 0.2, 500)
+    assert result.endswith(pr_response().split("\n\n", 1)[1])
+    assert api_call.call_count == 2
+
+
+def test_pr_retries_when_title_is_a_code_fence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """코드 펜스를 제목으로 쓴 PR 응답은 한 번 재생성합니다."""
+    fenced_response = "```markdown\n\n" + pr_response().split("\n\n", 1)[1] + "\n```"
+    api_call = Mock(side_effect=[fenced_response, pr_response()])
+    monkeypatch.setattr(ai_service, "ai_call_api", api_call)
+
+    result = ai_service.ai_generate_validated("diff", "pr", None, 0.2, 500)
+
     assert result.endswith(pr_response().split("\n\n", 1)[1])
     assert api_call.call_count == 2
 
@@ -405,6 +441,31 @@ def test_http_errors_are_explained(
 
     with pytest.raises(RuntimeError, match=message):
         ai_service.ai_call_api("prompt", None, 0.2, 500)
+
+
+def test_http_error_includes_sanitized_api_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """API 오류의 원인을 포함하되 응답에 반사된 키는 가립니다."""
+    response = requests.Response()
+    response.status_code = 400
+    response._content = (
+        b'{"error":{"message":"Unsupported model; key TEST_ONLY_KEY"}}'
+    )
+    monkeypatch.setattr(ai_service, "load_dotenv", lambda: None)
+    monkeypatch.setenv("API_KEY", "TEST_ONLY_KEY")
+    monkeypatch.setattr(
+        ai_service.requests,
+        "post",
+        Mock(side_effect=requests.HTTPError(response=response)),
+    )
+
+    with pytest.raises(RuntimeError) as error:
+        ai_service.ai_call_api("prompt", "unknown-model", 0.2, 500)
+
+    assert "Unsupported model" in str(error.value)
+    assert "[REDACTED]" in str(error.value)
+    assert "TEST_ONLY_KEY" not in str(error.value)
 
 
 @pytest.mark.parametrize(
