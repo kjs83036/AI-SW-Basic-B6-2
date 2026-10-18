@@ -11,11 +11,27 @@ Git 저장소의 변경 상태와 diff를 확인하고, 외부 AI API를 사용�
 
 ## 설치 및 설정
 
-저장소 루트에서 의존성을 설치합니다.
+`pyproject.toml`과 `uv.lock`은 두 운영체제에서 공유하고, 가상환경은 Windows와 macOS 각각의 로컬 경로에 따로 만듭니다. 가상환경은 운영체제별 실행 파일과 인터프리터 경로를 포함하므로 내 드라이브 같은 동기화 폴더에 넣거나 다른 운영체제에서 재사용하지 마세요.
+
+저장소 루트에서 현재 터미널에 맞는 환경 변수와 설치 명령을 실행합니다. 아래 경로는 프로젝트별 가상환경을 공용 가상환경 폴더에 두는 예시입니다.
+
+Windows PowerShell:
 
 ```console
-uv sync
+$env:UV_PROJECT_ENVIRONMENT = "$env:USERPROFILE\Documents\Codex\venvs\output-6-1"
+uv sync --locked
+uv run --locked output-6-1 --help
 ```
+
+macOS (zsh):
+
+```console
+export UV_PROJECT_ENVIRONMENT="$HOME/Documents/Codex/venvs/output-6-1"
+uv sync --locked
+uv run --locked output-6-1 --help
+```
+
+`UV_PROJECT_ENVIRONMENT` 설정은 터미널을 새로 열면 사라집니다. 계속 사용할 경우 Windows PowerShell 프로필과 macOS `~/.zshrc`에 각 운영체제용 설정 줄을 추가하세요. 현재 프로젝트는 Python 3.12를 지정하므로, 해당 버전이 없다면 먼저 `uv python install 3.12`를 실행합니다.
 
 프로젝트 루트에 `.env` 파일을 만들고 API 키를 설정합니다. `.env` 파일은 저장소에 커밋하지 마세요.
 
