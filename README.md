@@ -19,7 +19,7 @@ Windows PowerShell:
 
 ```console
 $env:UV_PROJECT_ENVIRONMENT = "$env:USERPROFILE\Documents\Codex\venvs\output-6-1"
-uv sync --locked
+uv sync --locked --system-certs
 uv run --locked output-6-1 --help
 ```
 
@@ -27,7 +27,7 @@ macOS (zsh):
 
 ```console
 export UV_PROJECT_ENVIRONMENT="$HOME/Documents/Codex/venvs/output-6-1"
-uv sync --locked
+uv sync --locked --system-certs
 uv run --locked output-6-1 --help
 ```
 
@@ -118,9 +118,21 @@ Git 변경 내용 기반 PR 초안 생성
 
 - diff에는 코드, 설정값 또는 개인정보가 포함될 수 있으므로 API 전송 전에 `diff` 명령으로 내용을 확인하세요.
 - `--safe-mode`는 앞에서부터 200줄만 전송합니다. 민감한 값을 찾아 가리지는 않으므로, 제한된 줄 안에 비밀값이 있으면 그대로 전송될 수 있습니다.
+- 생성 명령은 stderr에 안전모드의 원문 줄 제한과 실제 API 요청 시도 횟수를 표시합니다. 형식 검증 후 재요청하면 한 명령에서 최대 두 번 호출할 수 있습니다.
 - 생성 결과는 검토용 초안입니다. 내용을 확인한 뒤 직접 적용하세요.
 - API 호출은 최초 요청과 형식 오류 시의 재시도를 합쳐 명령당 최대 두 번입니다. 사용량이나 비용을 관리하려면 변경 내용을 확인한 뒤 필요한 생성 명령만 실행하세요.
-- API 키를 코드나 저장소에 올리지 마세요. API 인증·네트워크 오류가 발생하면 설정과 연결 상태를 확인하세요.
+- HTTPS 인증서는 운영체제의 신뢰 저장소로 검증합니다. API 키를 코드나 저장소에 올리지 마세요. API 인증·네트워크 오류가 발생하면 설정과 연결 상태를 확인하세요.
+
+## 테스트 및 오류 코드
+
+개발 의존성을 포함해 환경을 설치한 뒤 프로젝트 루트에서 테스트를 실행합니다.
+
+```console
+uv sync --locked
+uv run --locked pytest -q
+```
+
+Git·API 요청 오류는 stderr에 `[ERROR]`로 출력하고 종료 코드 `1`을 반환합니다. 변경 사항이 없어 생성을 건너뛰면 안내 문구를 출력하고 종료 코드 `0`을 반환합니다. 잘못된 명령행 옵션은 argparse 종료 코드 `2`를 반환합니다. 자동화에서는 이 종료 코드를 확인하세요.
 
 ## 프로젝트 구조
 
@@ -129,11 +141,17 @@ output_6_1/
 ├── pyproject.toml
 ├── uv.lock
 ├── README.md
+├── docs/
+│   └── 검증_시나리오.md
+├── tests/
+│   ├── conftest.py
+│   ├── test_cli.py
+│   ├── test_ai_service.py
+│   └── test_git_service.py
 └── src/
     └── output_6_1/
         ├── __init__.py
         ├── main.py
         ├── ai_service.py
-        ├── git_service.py
-        └── error_decorator.py
+        └── git_service.py
 ```
