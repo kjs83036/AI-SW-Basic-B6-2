@@ -1,11 +1,14 @@
 import argparse
+from argparse import ArgumentParser, Namespace
+
+# 구현 예정: 패키지 실행 시 내부 모듈을 상대 경로로 불러오도록 연결합니다.
 import ai_service
 import error_decorator
 import git_service
 
 
 @error_decorator.handle_error
-def show_status(_args):
+def show_status(_args: Namespace) -> None:
     """현재 Git 변경 상태를 출력합니다."""
     status = git_service.git_status()
     if status:
@@ -15,7 +18,7 @@ def show_status(_args):
 
 
 @error_decorator.handle_error
-def show_diff(_args):
+def show_diff(_args: Namespace) -> None:
     """스테이징하지 않은 추적 파일의 변경 내용을 출력합니다."""
     diff = git_service.git_diff()
     if diff:
@@ -25,7 +28,7 @@ def show_diff(_args):
 
 
 @error_decorator.handle_error
-def generate_commit(args):
+def generate_commit(args: Namespace) -> None:
     """Git 변경 내용으로 커밋 메시지 초안을 생성합니다."""
     diff = git_service.git_diff()
     if not diff:
@@ -43,7 +46,7 @@ def generate_commit(args):
 
 
 @error_decorator.handle_error
-def generate_pr(args):
+def generate_pr(args: Namespace) -> None:
     """Git 변경 내용으로 PR 초안을 생성합니다."""
     diff = git_service.git_diff()
     if not diff:
@@ -60,7 +63,8 @@ def generate_pr(args):
     print(result)
 
 
-def build_parser():
+def build_parser() -> ArgumentParser:
+    """CLI 명령과 AI 생성 옵션을 정의한 파서를 구성합니다."""
     parser = argparse.ArgumentParser(
         description="Git 변경사항으로 커밋 메시지와 PR 초안을 만듭니다."
     )
@@ -87,7 +91,8 @@ def build_parser():
     return parser
 
 
-def main():
+def main() -> None:
+    """명령행 인자를 해석하고 선택된 명령 처리 함수를 실행합니다."""
     args = build_parser().parse_args()
     args.handler(args)
 
