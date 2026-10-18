@@ -160,6 +160,35 @@ def test_pr_retries_when_title_is_a_code_fence(
     assert api_call.call_count == 2
 
 
+@pytest.mark.parametrize("output_type", ["commit", "pr"])
+@pytest.mark.parametrize("title", ["` `", "[](/url)"])
+def test_invisible_or_formatted_title_triggers_retry(
+    output_type: str,
+    title: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """표시할 내용이 없거나 서식이 있는 제목은 한 번 재생성합니다."""
+    valid_response = (
+        pr_response()
+        if output_type == "pr"
+        else "변경 내용을 반영합니다"
+    )
+    invalid_response = title + (
+        "\n\n" + pr_response().split("\n\n", 1)[1]
+        if output_type == "pr"
+        else ""
+    )
+    api_call = Mock(side_effect=[invalid_response, valid_response])
+    monkeypatch.setattr(ai_service, "ai_call_api", api_call)
+
+    result = ai_service.ai_generate_validated(
+        "diff", output_type, None, 0.2, 500
+    )
+
+    assert result == ai_service.ai_validate(valid_response, output_type)
+    assert api_call.call_count == 2
+
+
 def test_pr_accepts_bullets_under_nested_headings() -> None:
     """필수 섹션 아래의 하위 제목과 불릿을 허용합니다."""
     response = pr_response().replace(
@@ -466,6 +495,30 @@ def test_http_error_includes_sanitized_api_reason(
     assert "Unsupported model" in str(error.value)
     assert "[REDACTED]" in str(error.value)
     assert "TEST_ONLY_KEY" not in str(error.value)
+
+
+def test_http_error_redacts_api_key_before_truncating_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """오류 원인을 자르기 전에 API 키 전체를 가려 일부 노출을 막습니다."""
+    api_key = "TEST_ONLY_BOUNDARY_SECRET"
+    response = requests.Response()
+    response.status_code = 400
+    response._content = (
+        ('{"error":{"message":"' + "x" * 190 + api_key + '"}}').encode("utf-8")
+    )
+    monkeypatch.setattr(ai_service, "load_dotenv", lambda: None)
+    monkeypatch.setenv("API_KEY", api_key)
+    monkeypatch.setattr(
+        ai_service.requests,
+        "post",
+        Mock(side_effect=requests.HTTPError(response=response)),
+    )
+
+    with pytest.raises(RuntimeError) as error:
+        ai_service.ai_call_api("prompt", "unknown-model", 0.2, 500)
+
+    assert "TEST_ONLY" not in str(error.value)
 
 
 @pytest.mark.parametrize(

@@ -172,14 +172,20 @@ def ai_validate(
         raise ValueError("제목이 비어 있습니다.")
 
     title_tokens = MarkdownIt("commonmark").parse(title)
+    title_inline_tokens = [token for token in title_tokens if token.type == "inline"]
     if (
-        not any(token.type == "inline" for token in title_tokens)
+        len(title_inline_tokens) != 1
         or any(
             token.type not in {"paragraph_open", "inline", "paragraph_close"}
             for token in title_tokens
         )
+        or any(child.type != "text" for child in title_inline_tokens[0].children or [])
+        or not any(
+            unescape(child.content).strip()
+            for child in title_inline_tokens[0].children or []
+        )
     ):
-        raise ValueError("제목은 서식 없는 한 줄이어야 합니다.")
+        raise ValueError("제목은 내용이 있는 서식 없는 한 줄이어야 합니다.")
 
     if len(lines) > 1 and lines[1].strip():
         raise ValueError("제목과 본문 사이에 빈 줄이 필요합니다.")
@@ -369,9 +375,10 @@ def ai_call_api(
             if not isinstance(detail, str) and isinstance(payload, dict):
                 detail = payload.get("message")
             if isinstance(detail, str) and detail.strip():
-                detail = " ".join(detail.split())[:200]
+                detail = " ".join(detail.split())
                 if api_key in detail:
                     detail = detail.replace(api_key, "[REDACTED]")
+                detail = detail[:200]
                 message += f" 원인: {detail}"
 
         raise RuntimeError(message) from None
