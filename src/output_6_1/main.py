@@ -119,8 +119,10 @@ def build_parser() -> ArgumentParser:
 
 def main() -> None:
     """명령행 인자를 해석하고 선택된 명령 처리 함수를 실행합니다."""
-    sys.stdout.reconfigure(encoding="utf-8")
-    sys.stderr.reconfigure(encoding="utf-8")
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8")
     args = build_parser().parse_args()
     try:
         args.handler(args)

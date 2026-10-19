@@ -2,9 +2,12 @@ import json
 import os
 import subprocess
 import sys
+from io import StringIO
 from pathlib import Path
 
 import pytest
+
+import output_6_1.main as cli
 
 
 CLI_BOOTSTRAP = """
@@ -50,6 +53,37 @@ def run_cli(
         text=True,
         encoding="utf-8",
     )
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_cli_supports_streams_without_reconfigure(
+    monkeypatch: pytest.MonkeyPatch, fails: bool
+) -> None:
+    """인코딩 재설정을 지원하지 않는 스트림에서도 결과와 오류를 출력합니다."""
+    stdout = StringIO()
+    stderr = StringIO()
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", stderr)
+    monkeypatch.setattr(sys, "argv", ["output-6-1", "status"])
+
+    def git_status() -> str:
+        """외부 Git 호출 없이 정상 결과나 오류를 재현합니다."""
+        if fails:
+            raise RuntimeError("Git 명령 실행에 실패했습니다.")
+        return " M 한글.py\n"
+
+    monkeypatch.setattr(cli.git_service, "git_status", git_status)
+
+    if fails:
+        with pytest.raises(SystemExit) as error:
+            cli.main()
+        assert error.value.code == 1
+        assert stdout.getvalue() == ""
+        assert stderr.getvalue() == "[ERROR] Git 명령 실행에 실패했습니다.\n"
+    else:
+        cli.main()
+        assert stdout.getvalue() == " M 한글.py\n"
+        assert stderr.getvalue() == ""
 
 
 def test_clean_repository_exits_successfully(
