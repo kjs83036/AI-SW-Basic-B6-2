@@ -109,7 +109,12 @@ def build_parser() -> ArgumentParser:
     for command, handler, help_text in commands:
         command_parser = subparsers.add_parser(command, help=help_text)
         command_parser.add_argument("--model", default=None)
-        command_parser.add_argument("--temperature", type=finite_temperature, default=0.2)
+        command_parser.add_argument(
+            "--temperature",
+            type=finite_temperature,
+            default=0.2,
+            help="생성 다양성을 조정합니다. opus 또는 claude-opus-* 모델에는 전송하지 않습니다.",
+        )
         command_parser.add_argument("--max-tokens", type=positive_token_count, default=500)
         command_parser.add_argument("--safe-mode", action="store_true")
         command_parser.set_defaults(handler=handler)

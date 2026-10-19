@@ -370,17 +370,20 @@ def ai_call_api(
 
         raise ValueError("API_KEY is not set in the environment variables.")
 
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": diff_after_prompt}],
+        "max_tokens": max_tokens,
+    }
+    if not model.startswith("claude-opus-"):
+        payload["temperature"] = temperature
+
     try:
         print(f"[INFO] AI API 요청: {request_number}회", file=sys.stderr)
         response = requests.post(
             "https://copa.codyssey.kr/v1/chat/completions",
             headers={"Authorization": f"Bearer {api_key}"},
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": diff_after_prompt}],
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-            },
+            json=payload,
             timeout=10,  # 요청 시간 제한을 10초로 설정
         )
         response.raise_for_status()

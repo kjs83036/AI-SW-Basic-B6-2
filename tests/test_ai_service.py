@@ -689,8 +689,24 @@ def test_safe_mode_reports_truncation_and_excludes_later_lines(
     assert "원본 201줄" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(
+    ("model", "expected_model", "sends_temperature"),
+    [
+        (None, "gemini-3.1-flash-lite", True),
+        ("gemini", "gemini-3.1-flash-lite", True),
+        ("gemini-3.1-flash-lite", "gemini-3.1-flash-lite", True),
+        ("chosen-model", "chosen-model", True),
+        ("claude-sonnet-4", "claude-sonnet-4", True),
+        ("opus", "claude-opus-4-8", False),
+        ("claude-opus-4-8", "claude-opus-4-8", False),
+        ("claude-opus-4-7", "claude-opus-4-7", False),
+    ],
+)
 def test_api_request_uses_selected_parameters(
     monkeypatch: pytest.MonkeyPatch,
+    model: str | None,
+    expected_model: str,
+    sends_temperature: bool,
 ) -> None:
     """모델과 생성 파라미터를 HTTP 요청에 전달합니다."""
     response = Mock()
@@ -700,13 +716,49 @@ def test_api_request_uses_selected_parameters(
     monkeypatch.setenv("API_KEY", "TEST_ONLY_KEY")
     monkeypatch.setattr(ai_service.requests, "post", post)
 
-    assert ai_service.ai_call_api("prompt", "chosen-model", 0.7, 321) == "초안"
+    assert ai_service.ai_call_api("prompt", model, 0.7, 321) == "초안"
 
     request = post.call_args.kwargs
-    assert request["json"]["model"] == "chosen-model"
-    assert request["json"]["temperature"] == 0.7
+    assert request["json"]["model"] == expected_model
+    if sends_temperature:
+        assert request["json"]["temperature"] == 0.7
+    else:
+        assert "temperature" not in request["json"]
     assert request["json"]["max_tokens"] == 321
     assert request["timeout"] == 10
+
+
+@pytest.mark.parametrize("output_type", ["commit", "pr"])
+@pytest.mark.parametrize("model", ["opus", "claude-opus-4-8"])
+def test_opus_omits_temperature_on_initial_request_and_retry(
+    output_type: str, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Opus 커밋·PR 생성은 최초 요청과 재시도 모두 temperature를 제외합니다."""
+    invalid_response = Mock()
+    invalid_response.json.return_value = {
+        "choices": [{"message": {"content": "가" * 81}}]
+    }
+    valid_response = Mock()
+    valid_response.json.return_value = {
+        "choices": [{"message": {"content": pr_response() if output_type == "pr" else "변경 반영"}}]
+    }
+    post = Mock(side_effect=[invalid_response, valid_response])
+    monkeypatch.setattr(ai_service, "load_dotenv", lambda: None)
+    monkeypatch.setenv("API_KEY", "TEST_ONLY_KEY")
+    monkeypatch.setattr(ai_service.requests, "post", post)
+
+    generate = ai_service.ai_pr if output_type == "pr" else ai_service.ai_commit
+    result = generate("+ 변경 내용", model, 0.7, 321)
+
+    assert result.startswith("-- PR Title --" if output_type == "pr" else "-- Commit Message --")
+    assert post.call_count == 2
+    for call in post.call_args_list:
+        assert call.args[0] == "https://copa.codyssey.kr/v1/chat/completions"
+        assert call.kwargs["headers"]["Authorization"] == "Bearer TEST_ONLY_KEY"
+        payload = call.kwargs["json"]
+        assert payload["model"] == "claude-opus-4-8"
+        assert payload["max_tokens"] == 321
+        assert "temperature" not in payload
 
 
 def test_missing_api_key_does_not_send_request(
