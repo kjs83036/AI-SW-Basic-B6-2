@@ -66,8 +66,8 @@ uv run output-6-1 --help
 
 | 옵션 | 기본값 | 설명 |
 | --- | --- | --- |
-| `--model` | `gemini-3.1-flash-lite` | 사용할 모델입니다. `gemini`는 기본 Gemini 모델 별칭이며, `opus` 별칭도 지원합니다. |
-| `--temperature` | `0.2` | 생성 결과의 다양성을 조정합니다. 유한한 실수를 입력하며, 모델별 허용 범위는 API 정책을 따릅니다. |
+| `--model` | `gemini-3.1-flash-lite` | 사용할 모델입니다. `gemini`는 기본 Gemini 모델의 별칭이고, `opus`는 `claude-opus-4-8`의 별칭입니다. 그 외 모델명은 입력한 그대로 전송합니다. |
+| `--temperature` | `0.2` | 생성 결과의 다양성을 조정합니다. 모든 모델에서 유한한 실수만 입력할 수 있으며, `opus` 또는 `claude-opus-*` 모델에는 최초 요청과 재시도 모두 이 값을 전송하지 않습니다. 다른 모델의 허용 범위는 API 정책을 따릅니다. |
 | `--max-tokens` | `500` | 응답의 최대 토큰 수입니다. 1 이상의 정수를 입력합니다. |
 | `--safe-mode` | 사용 안 함 | API로 전송하는 diff를 최대 200줄로 제한합니다. |
 
@@ -78,6 +78,7 @@ uv run output-6-1 status
 uv run output-6-1 diff
 uv run output-6-1 commit --model gemini --temperature 0.2 --max-tokens 500
 uv run output-6-1 pr --model gemini --temperature 0.2 --max-tokens 500 --safe-mode
+uv run output-6-1 commit --model opus --max-tokens 500
 ```
 
 ## 변경 내용 수집 범위
