@@ -101,13 +101,19 @@ def ai_generate_validated(
     temperature: float,
     max_tokens: int,
 ) -> str:
-    """생성 결과를 검증하고 형식 오류가 있으면 한 번 재생성합니다."""
+    """응답 형식을 검증하고 형식 오류가 있으면 한 번 재생성합니다.
+
+    잘못된 형식과 토큰 한도에 걸린 응답만 재시도합니다. 네트워크·인증 등
+    API 호출 자체의 실패는 별도 요청으로 반복하지 않고 호출자에게 전달합니다.
+    토큰이 잘린 응답은 불완전한 내용을 재작성 참고문에 넣지 않습니다.
+    """
     call_count = 1
     try:
         response = ai_call_api(
             prompt, model, temperature, max_tokens, request_number=call_count
         )
     except IncompleteResponseError as error:
+        # 잘린 본문은 참고 가치가 없으므로 재시도 사유만 보존합니다.
         response = None
         validation_error = error
     else:
@@ -133,6 +139,7 @@ def ai_generate_validated(
         "diff에 없는 사실은 추가하지 말고, 수정된 결과만 출력하세요."
     )
 
+    # 재시도는 루프 없이 한 번만 실행해 API 요청 횟수를 최대 두 번으로 제한합니다.
     call_count += 1
     try:
         retry_response = ai_call_api(
@@ -162,7 +169,12 @@ def ai_validate(
     response: str | None,
     output_type: Literal["commit", "pr"],
 ) -> str:
-    """생성 결과의 제목과 본문이 요구 형식에 맞는지 확인합니다."""
+    """생성 결과의 제목과 본문이 커밋 또는 PR 형식에 맞는지 확인합니다.
+
+    Markdown 파서가 인식한 제목·목록만 구조로 취급해 코드 블록 안의 문구가
+    실제 섹션이나 불릿으로 오인되지 않게 합니다. 두 출력 형식의 제목 길이와
+    본문 규칙을 각각 확인한 뒤 화면에 표시할 결과에 종류별 머리말을 붙입니다.
+    """
     if not isinstance(response, str) or not response.strip():
         raise ValueError("AI 생성 결과가 비어 있습니다.")
 
@@ -178,6 +190,7 @@ def ai_validate(
     if not title:
         raise ValueError("제목이 비어 있습니다.")
 
+    # Markdown 표기를 걷어낸 뒤에도 제목에 실제로 보이는 내용이 있는지 확인합니다.
     title_tokens = MarkdownIt("commonmark").parse(title)
     title_inline_tokens = [token for token in title_tokens if token.type == "inline"]
     if (
@@ -193,6 +206,7 @@ def ai_validate(
     if len(lines) > 1 and lines[1].strip():
         raise ValueError("제목과 본문 사이에 빈 줄이 필요합니다.")
 
+    # 제목 다음의 빈 줄은 형식으로 소비하고, 본문의 바깥쪽 공백 줄만 정리합니다.
     body_lines = lines[2:]
     while body_lines and not body_lines[0].strip():
         body_lines.pop(0)
@@ -206,6 +220,7 @@ def ai_validate(
         raise ValueError(f"제목은 {title_limit}자 이하여야 합니다.")
 
     if output_type == "commit":
+        # 빈 본문은 허용하되, 본문이 있으면 실제 내용이 든 불릿만 받습니다.
         if body:
             body_lines = [line for line in body.splitlines() if line.strip()]
             if not 1 <= len(body_lines) <= 2:
@@ -231,6 +246,7 @@ def ai_validate(
         if _contains_html_comment(body):
             raise ValueError("PR 본문에 숨겨진 HTML 주석을 포함할 수 없습니다.")
 
+        # 코드 펜스 밖에 있는 필수 제목만 찾고, 섹션마다 독립적으로 불릿을 확인합니다.
         body_lines = body.splitlines()
         sections = ["## Why", "## What", "## How to Test"]
         positions = []
@@ -257,6 +273,7 @@ def ai_validate(
             end = (
                 positions[index + 1] if index + 1 < len(positions) else len(body_lines)
             )
+            # 임의의 상위 제목에서 섹션을 끊어 다음 섹션의 불릿을 빌리지 않게 합니다.
             following_headings = [
                 line_number
                 for line_number in range(position + 1, end)
@@ -287,7 +304,12 @@ def ai_validate(
 
 
 def _markdown_structure(lines: list[str]) -> tuple[list[str | None], set[int]]:
-    """실제 Markdown 제목과 내용이 있는 목록 항목의 줄 번호를 찾습니다."""
+    """Markdown 토큰을 원문 줄에 대응시키고 내용 있는 목록을 찾습니다.
+
+    줄별 구조 표시는 일반 문장이나 코드 블록의 문구를 제목·목록으로 오인하지
+    않도록 파서가 인식한 토큰만 채웁니다. 중첩 목록 스택으로 내부의 실제 문구나
+    코드가 어느 목록 항목에 속하는지도 함께 기록합니다.
+    """
     structural_lines: list[str | None] = [None] * len(lines)
     list_items_with_content: set[int] = set()
     tokens = MarkdownIt("commonmark").parse("\n".join(lines))
@@ -295,11 +317,13 @@ def _markdown_structure(lines: list[str]) -> tuple[list[str | None], set[int]]:
     for index, token in enumerate(tokens):
         is_heading = token.type == "heading_open" and token.level == 0
         if is_heading and token.map:
+            # 파서의 제목 토큰을 검증기가 쓰는 일관된 Markdown 제목 형태로 바꿉니다.
             line_number = token.map[0]
             structural_lines[line_number] = (
                 f"{'#' * int(token.tag[1:])} {tokens[index + 1].content}"
             )
         elif token.type == "list_item_open" and token.map:
+            # 내부 목록도 유지할 수 있도록 열릴 때 쌓고 닫힐 때 하나씩 제거합니다.
             line_number = token.map[0]
             list_item_stack.append(line_number)
             structural_lines[line_number] = lines[line_number]
@@ -327,7 +351,11 @@ def _contains_html_comment(text: str) -> bool:
 
 
 def _inline_token_has_content(token: Any) -> bool:
-    """화면에 표시되는 텍스트나 대체 텍스트가 있는지 확인합니다."""
+    """인라인 토큰 트리에서 화면에 보일 문자나 이미지 대체 문구를 찾습니다.
+
+    이미지 안의 텍스트는 대체 문구를 확인하도록 재귀적으로 살피고, 강조나
+    링크 같은 장식 토큰 자체는 내용으로 세지 않습니다.
+    """
     return any(
         _inline_token_has_content(child)
         if child.type == "image"
@@ -338,7 +366,12 @@ def _inline_token_has_content(token: Any) -> bool:
 
 
 def _has_visible_content(text: str) -> bool:
-    """공백·제어·서식·결합 문자만 있는 내용을 제외합니다."""
+    """공백이나 유니코드 서식 문자만 있는 문자열을 내용으로 세지 않습니다.
+
+    화면에서 독립된 글자로 읽히지 않는 제어·서식·결합 문자와 대표적인 빈
+    유니코드 문자를 제외해, 눈에 보이지 않는 텍스트로 제목이나 불릿을 채우지
+    못하게 합니다.
+    """
     return any(
         not character.isspace()
         and category(character) not in {"Cc", "Cf", "Cs", "Mn", "Me"}
@@ -354,9 +387,14 @@ def ai_call_api(
     max_tokens: int,
     request_number: int = 1,
 ) -> str:
-    """환경변수의 키와 생성 설정을 사용해 AI API를 호출합니다."""
-    # 환경변수에서 가져온 API 키를 요청 인증 정보로 사용합니다.
+    """모델 별칭과 옵션을 적용해 API를 호출하고 응답을 안전하게 해석합니다.
 
+    Opus 모델에는 지원되지 않는 temperature를 보내지 않습니다. HTTP 상태,
+    네트워크·TLS 오류와 응답 형식 오류를 사용자에게 구분해 안내하며, 서버가
+    돌려준 상세 사유는 키를 가리고 제어 문자를 표시 가능한 형태로 정리합니다.
+    """
+
+    # 짧은 별칭만 정식 모델명으로 치환하고 다른 사용자 지정 모델은 보존합니다.
     if not model or model == "gemini":
         model = "gemini-3.1-flash-lite"
 
@@ -378,13 +416,14 @@ def ai_call_api(
     if not model.startswith("claude-opus-"):
         payload["temperature"] = temperature
 
+    # 요청 단계의 원인을 구분해 인증 정보나 원시 응답을 오류 메시지에 노출하지 않습니다.
     try:
         print(f"[INFO] AI API 요청: {request_number}회", file=sys.stderr)
         response = requests.post(
             "https://copa.codyssey.kr/v1/chat/completions",
             headers={"Authorization": f"Bearer {api_key}"},
             json=payload,
-            timeout=10,  # 요청 시간 제한을 10초로 설정
+            timeout=10,
         )
         response.raise_for_status()
     except requests.exceptions.HTTPError as error:
@@ -409,6 +448,7 @@ def ai_call_api(
             if not isinstance(detail, str) and isinstance(payload, dict):
                 detail = payload.get("message")
             if isinstance(detail, str) and detail.strip():
+                # 응답을 한 줄로 만들고 키를 가린 뒤 제어 문자를 이스케이프해 길이를 제한합니다.
                 detail = " ".join(detail.split())
                 if api_key in detail:
                     detail = detail.replace(api_key, "[REDACTED]")
@@ -439,6 +479,7 @@ def ai_call_api(
     except requests.RequestException as error:
         raise RuntimeError("API 요청 처리 중 오류가 발생했습니다.") from error
 
+    # HTTP 요청이 성공해도 응답 JSON 구조와 생성 종료 사유를 별도로 검사합니다.
     try:
         choice = response.json()["choices"][0]
         if isinstance(choice, dict) and choice.get("finish_reason") in (
@@ -461,8 +502,11 @@ def ai_call_api(
 
 
 def limit_diff(diff: str) -> str:
-    """안전모드에서 API에 전달할 diff의 크기를 제한합니다."""
-    # 200줄을 넘으면 앞부분만 남겨 전송량을 제한합니다.
+    """안전모드용으로 diff의 원문을 최대 200줄까지 남깁니다.
+
+    이미 제한 안에 있으면 입력을 그대로 돌려주고, 초과한 경우에는 앞부분과
+    잘렸음을 알리는 표식을 붙여 API가 일부 변경 내용만 받았음을 알립니다.
+    """
     lines = diff.splitlines()
     if len(lines) <= 200:
         return diff
@@ -471,7 +515,11 @@ def limit_diff(diff: str) -> str:
 
 
 def _prepare_diff(diff: str, safe_mode: bool) -> str:
-    """안전모드 적용 여부를 알리고 API에 전달할 diff를 준비합니다."""
+    """안전모드에 맞춰 diff를 그대로 두거나 줄 수를 제한합니다.
+
+    제한이 켜졌을 때만 원본 줄 수와 보낼 원문 줄 수를 stderr에 알려 사용자가
+    전송 범위를 확인할 수 있게 합니다.
+    """
     if not safe_mode:
         return diff
 

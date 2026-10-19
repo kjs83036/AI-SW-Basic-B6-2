@@ -25,7 +25,13 @@ def show_diff(_args: Namespace) -> None:
 
 
 def generate_commit(args: Namespace) -> None:
-    """Git 변경 내용으로 커밋 메시지 초안을 생성합니다."""
+    """변경 상태와 unstaged diff를 확인한 뒤 커밋 메시지 초안을 생성합니다.
+
+    git status는 스테이징·미추적 파일도 보여주지만 git diff는 스테이징되지 않은
+    추적 파일만 담습니다. 따라서 미추적 파일이나 스테이징된 변경만 있으면
+    API 요청을 보내지 않고 초안을 만들 diff가 없다고 안내합니다.
+    실제 Git 커밋은 실행하지 않고 검증된 초안만 출력합니다.
+    """
     status_result = git_service.git_status()
     if not status_result:
         print("변경 사항이 없습니다. 커밋 메시지를 생성할 수 없습니다.")
@@ -46,7 +52,11 @@ def generate_commit(args: Namespace) -> None:
 
 
 def generate_pr(args: Namespace) -> None:
-    """Git 변경 내용으로 PR 초안을 생성합니다."""
+    """변경 상태와 unstaged diff를 확인한 뒤 PR 초안을 생성합니다.
+
+    status와 diff를 각각 확인해 생성할 내용이 없는 경우 API 호출을 생략합니다.
+    초안만 출력하므로 이 함수는 원격 저장소에 PR을 만들지 않습니다.
+    """
     status_result = git_service.git_status()
     if not status_result:
         print("변경 사항이 없습니다. PR 초안을 생성할 수 없습니다.")
@@ -90,7 +100,11 @@ def positive_token_count(value: str) -> int:
 
 
 def build_parser() -> ArgumentParser:
-    """CLI 명령과 AI 생성 옵션을 정의한 파서를 구성합니다."""
+    """status·diff·생성 명령과 생성 옵션을 구성합니다.
+
+    commit과 pr은 모델, 유한한 temperature, 양의 토큰 수, 안전모드 옵션을
+    공유하고, 파싱 후 각 명령에 연결된 처리 함수로 분기합니다.
+    """
     parser = argparse.ArgumentParser(
         description="Git 변경사항으로 커밋 메시지와 PR 초안을 만듭니다."
     )
@@ -123,7 +137,12 @@ def build_parser() -> ArgumentParser:
 
 
 def main() -> None:
-    """명령행 인자를 해석하고 선택된 명령 처리 함수를 실행합니다."""
+    """출력 인코딩을 설정하고 선택한 명령을 실행합니다.
+
+    재설정 기능이 있는 터미널 스트림은 UTF-8로 맞춰 한글을 출력하고, 캡처용
+    스트림처럼 해당 기능이 없으면 그대로 사용합니다. 예상 가능한 실행 오류는
+    stderr에 표시하고 종료 코드 1로 반환합니다.
+    """
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:
