@@ -1,7 +1,8 @@
 import os
 import re
 import sys
-from typing import Literal
+from importlib import import_module
+from typing import Any, Literal
 from unicodedata import category
 
 import truststore
@@ -10,8 +11,8 @@ truststore.inject_into_ssl()
 
 import requests
 from dotenv import load_dotenv
-from markdown_it import MarkdownIt
-from markdown_it.token import Token
+
+MarkdownIt = import_module("markdown_it").MarkdownIt
 
 COMMIT_PROMPT = """다음 Git diff를 바탕으로 한국어 커밋 메시지를 작성하세요.
 
@@ -259,10 +260,10 @@ def ai_validate(
             following_headings = [
                 line_number
                 for line_number in range(position + 1, end)
-                if structural_lines[line_number] is not None
+                if (structural_line := structural_lines[line_number]) is not None
                 and (
                     heading := re.match(
-                        r"^(#{1,6})(?:\s|$)", structural_lines[line_number]
+                        r"^(#{1,6})(?:\s|$)", structural_line
                     )
                 )
                 and len(heading.group(1)) <= 2
@@ -325,7 +326,7 @@ def _contains_html_comment(text: str) -> bool:
     )
 
 
-def _inline_token_has_content(token: Token) -> bool:
+def _inline_token_has_content(token: Any) -> bool:
     """화면에 표시되는 텍스트나 대체 텍스트가 있는지 확인합니다."""
     return any(
         _inline_token_has_content(child)
