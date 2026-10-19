@@ -169,28 +169,34 @@ def ai_validate(
     response: str | None,
     output_type: Literal["commit", "pr"],
 ) -> str:
-    """생성 결과의 제목과 본문이 커밋 또는 PR 형식에 맞는지 확인합니다.
+    """과제의 길이·형식 제한에 따라 커밋 또는 PR 생성 결과를 검증합니다.
 
-    Markdown 파서가 인식한 제목·목록만 구조로 취급해 코드 블록 안의 문구가
-    실제 섹션이나 불릿으로 오인되지 않게 합니다. 두 출력 형식의 제목 길이와
-    본문 규칙을 각각 확인한 뒤 화면에 표시할 결과에 종류별 머리말을 붙입니다.
+    커밋은 한 줄 제목(최대 72자, 50자 이내 권장)과 선택 본문(포함 시 내용 있는
+    하이픈 불릿 1~2개)을 확인합니다. PR은 한 줄 제목(최대 80자), 필수 세 섹션과
+    섹션마다 내용 있는 불릿 한 개 이상을 확인합니다. Markdown 파서가 실제 제목과
+    목록으로 인식한 토큰만 세어 코드 펜스 안의 예시가 규칙으로 오인되지 않게 합니다.
+    이 함수는 길이와 구조만 검사하며, diff에 근거한 문구인지까지 판정하지는 않습니다.
     """
+    # 문자열이 아니거나 공백뿐인 응답은 제목·본문으로 사용할 수 없습니다.
     if not isinstance(response, str) or not response.strip():
         raise ValueError("AI 생성 결과가 비어 있습니다.")
 
+    # 터미널 출력에 영향을 주는 제어 문자는 줄바꿈·캐리지 리턴·탭을 제외하고 막습니다.
     if any(
         category(character) == "Cc" and character not in "\n\r\t"
         for character in response
     ):
         raise ValueError("AI 생성 결과에 터미널 제어문자가 포함되어 있습니다.")
 
+    # 바깥쪽 공백을 정리한 응답에서 첫 줄만 제목으로 삼고, 뒤의 줄은 본문 형식에 맞는지 따로 검사합니다.
     lines = response.strip().splitlines()
     title = lines[0].strip()
 
+    # 첫 번째 줄이 비어 있으면 제목이 누락된 응답으로 처리합니다.
     if not title:
         raise ValueError("제목이 비어 있습니다.")
 
-    # Markdown 표기를 걷어낸 뒤에도 제목에 실제로 보이는 내용이 있는지 확인합니다.
+    # 제목 줄은 일반 문단이어야 하며, 제목 표기만 있거나 화면에 보이는 내용이 없으면 막습니다.
     title_tokens = MarkdownIt("commonmark").parse(title)
     title_inline_tokens = [token for token in title_tokens if token.type == "inline"]
     if (
@@ -203,10 +209,11 @@ def ai_validate(
     ):
         raise ValueError("제목은 내용이 있는 한 줄이어야 합니다.")
 
+    # 본문을 포함하면 두 번째 줄은 빈 줄이어야 하므로 제목이 여러 줄로 이어지는 형식을 막습니다.
     if len(lines) > 1 and lines[1].strip():
         raise ValueError("제목과 본문 사이에 빈 줄이 필요합니다.")
 
-    # 제목 다음의 빈 줄은 형식으로 소비하고, 본문의 바깥쪽 공백 줄만 정리합니다.
+    # 구분용 빈 줄은 본문에서 제외하고, 본문 앞뒤의 추가 공백 줄도 정리해 형식 검사에 섞이지 않게 합니다.
     body_lines = lines[2:]
     while body_lines and not body_lines[0].strip():
         body_lines.pop(0)
@@ -216,15 +223,18 @@ def ai_validate(
     structural_lines, list_items_with_content = _markdown_structure(body.splitlines())
     title_limit = 72 if output_type == "commit" else 80
 
+    # 과제는 커밋 제목 50자 이내를 권장하지만, 여기서는 필수 상한 72자를 강제합니다. PR은 최대 80자입니다.
     if len(title) > title_limit:
         raise ValueError(f"제목은 {title_limit}자 이하여야 합니다.")
 
     if output_type == "commit":
-        # 빈 본문은 허용하되, 본문이 있으면 실제 내용이 든 불릿만 받습니다.
+        # 과제의 본문 기준 중 이 구현은 파일 언급 대신 핵심 변경 1~2개를 불릿으로 요약하는 방식을 선택합니다.
         if body:
+            # 선택 본문에는 핵심 변경을 1~2개만 적도록 빈 줄이 아닌 줄 수를 제한합니다.
             body_lines = [line for line in body.splitlines() if line.strip()]
             if not 1 <= len(body_lines) <= 2:
                 raise ValueError("커밋 본문은 1~2개의 불릿으로 작성해야 합니다.")
+            # 각 본문 줄이 실제 Markdown 목록이고, 과제 예시와 같이 '- ' 뒤에 내용이 있는지 확인합니다.
             if any(
                 structural_lines[index] is None
                 or index not in list_items_with_content
@@ -235,23 +245,28 @@ def ai_validate(
             ):
                 raise ValueError("커밋 본문은 내용 있는 불릿으로만 작성해야 합니다.")
 
+        # 사용자가 결과를 복사하기 쉽도록 커밋 제목과 본문을 출력 구분 머리말로 묶습니다.
         result = f"-- Commit Message --\n{title}"
         if body:
             result += f"\n\n{body}"
         return result
 
     if output_type == "pr":
+        # PR은 제목뿐 아니라 본문도 필수이므로 제목만 생성된 응답은 거부합니다.
         if not body:
             raise ValueError("PR 본문이 비어 있습니다.")
+        # 숨겨진 주석으로 필수 내용 검사를 우회하지 못하도록 HTML 주석을 막습니다.
         if _contains_html_comment(body):
             raise ValueError("PR 본문에 숨겨진 HTML 주석을 포함할 수 없습니다.")
 
-        # 코드 펜스 밖에 있는 필수 제목만 찾고, 섹션마다 독립적으로 불릿을 확인합니다.
+        # 코드 펜스 안의 예시는 제외하고, 정확히 '##' 단계인 Markdown 제목에서 필수 섹션을 찾습니다.
         body_lines = body.splitlines()
+        # Why, What, How to Test 세 섹션을 각각 한 번씩 포함해야 합니다.
         sections = ["## Why", "## What", "## How to Test"]
         positions = []
 
         for section in sections:
+            # '## Why(변경 배경)'처럼 섹션 이름 뒤에 한 쌍의 괄호 설명을 허용하되, 제목 줄 전체를 검사합니다.
             section_pattern = re.compile(
                 rf"{re.escape(section)}(?:\s*\([^()\r\n]+\))?"
             )
@@ -260,12 +275,14 @@ def ai_validate(
                 for index, line in enumerate(structural_lines)
                 if line is not None and section_pattern.fullmatch(line.strip())
             ]
+            # Why, What, How to Test 중 하나라도 빠지거나 같은 필수 섹션이 중복되면 거부합니다.
             if len(matches) != 1:
                 raise ValueError(
                     f"PR 본문에 '{section}' 섹션이 정확히 하나 있어야 합니다."
                 )
             positions.append(matches[0])
 
+        # 본문 섹션의 순서를 Why → What → How to Test로 고정합니다.
         if positions != sorted(positions):
             raise ValueError("PR 섹션은 Why, What, How to Test 순서여야 합니다.")
 
@@ -273,7 +290,7 @@ def ai_validate(
             end = (
                 positions[index + 1] if index + 1 < len(positions) else len(body_lines)
             )
-            # 임의의 상위 제목에서 섹션을 끊어 다음 섹션의 불릿을 빌리지 않게 합니다.
+            # 필수 섹션 사이에 다른 최상위·2단계 제목이 있으면 현재 섹션을 거기서 끝내 이후 불릿을 빌리지 못하게 합니다.
             following_headings = [
                 line_number
                 for line_number in range(position + 1, end)
@@ -288,6 +305,7 @@ def ai_validate(
             if following_headings:
                 end = following_headings[0]
             section_lines = body_lines[position + 1 : end]
+            # 현재 섹션 범위 안에서 Markdown 목록으로 인식되고 실제 내용도 있는 하이픈 불릿만 셉니다.
             bullets = [
                 line
                 for index, line in enumerate(section_lines, start=position + 1)
@@ -295,11 +313,14 @@ def ai_validate(
                 if index in list_items_with_content
                 if re.match(r"^\s*-(?:\s|$)", line)
             ]
+            # Why, What, How to Test 각각에 최소 한 개의 불릿이 있어야 통과합니다.
             if not bullets:
                 raise ValueError(f"'{sections[index]}' 섹션에 불릿이 필요합니다.")
 
+        # 터미널에서 제목과 본문을 구분해 확인하고 복사할 수 있도록 각각 머리말을 붙입니다.
         return f"-- PR Title --\n{title}\n\n-- PR Body --\n{body}"
 
+    # commit 또는 pr 이외의 출력 종류는 형식 규칙이 정의되지 않았으므로 거부합니다.
     raise ValueError("지원하지 않는 출력 종류입니다.")
 
 
